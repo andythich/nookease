@@ -11,52 +11,36 @@ const PANELS = [
     description: 'Lay out your days the way you\'d arrange a quiet room — with care, with breathing space, with a place for everything.',
   },
   {
-    id: 'workout',
-    label: 'Movement',
-    number: '02',
-    tagline: 'Small motions, stacked',
-    hue: '#E85D2F',
-    description: 'Track sets, reps, walks, stretches. No shouting coaches. Just a gentle record of what your body did today.',
-  },
-  {
     id: 'journal',
     label: 'Journal',
-    number: '03',
+    number: '02',
     tagline: 'A page that listens',
-    hue: '#D94A20',
+    hue: '#E85D2F',
     description: 'Write it out. Fragments, lists, long letters to no one. Your thoughts stay yours — encrypted, local, calm.',
   },
   {
-    id: 'habits',
-    label: 'Habits',
+    id: 'workout',
+    label: 'Workout log',
+    number: '03',
+    tagline: 'Small motions, stacked',
+    hue: '#D94A20',
+    description: 'Track sets, reps, walks, stretches. No shouting coaches. Just a gentle record of what your body did today.',
+  },
+  {
+    id: 'notecards',
+    label: 'Notecards',
     number: '04',
-    tagline: 'The shape of consistency',
+    tagline: 'Ideas, one at a time',
     hue: '#FF8C5A',
-    description: 'Streaks without the guilt. A visual garden of the small things you keep coming back to.',
+    description: 'Capture thoughts on small cards. Shuffle them, group them, rediscover them. A quiet way to think slowly.',
   },
   {
-    id: 'meals',
-    label: 'Meals',
+    id: 'diary',
+    label: 'Diary',
     number: '05',
-    tagline: 'Nourish, don\'t track',
+    tagline: 'The record of your days',
     hue: '#F2633A',
-    description: 'Note what you ate, how it felt. A kinder way to understand the rhythm of how you feed yourself.',
-  },
-  {
-    id: 'mood',
-    label: 'Mood',
-    number: '06',
-    tagline: 'Weather, inside',
-    hue: '#FF9068',
-    description: 'Check in with a single tap. Over time, patterns emerge — quietly, without judgment.',
-  },
-  {
-    id: 'sleep',
-    label: 'Sleep',
-    number: '07',
-    tagline: 'Soft landings',
-    hue: '#C94116',
-    description: 'A wind-down ritual, a gentle waking log, and the patterns of your nights — uncomplicated.',
+    description: 'A dated companion. Some days a sentence, some days a page. The shape of your life, kept close.',
   },
 ];
 
@@ -82,7 +66,7 @@ const GlobalStyles = () => (
       content: '';
       position: fixed; inset: 0;
       pointer-events: none;
-      z-index: 100;
+      z-index: 1; /* was 100, panels appear above the grain layer now */
       opacity: 0.35;
       mix-blend-mode: multiply;
       background-image: url("data:image/svg+xml;utf8,<svg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.17 0 0 0 0 0.12 0 0 0 0 0.09 0 0 0 0.25 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
@@ -304,67 +288,41 @@ const PanelIllustration = ({ id, hue, hovered }) => {
     </svg>
   );
 
-  if (id === 'habits') return (
-    <svg {...common} viewBox="0 0 220 220">
-      {Array.from({length: 35}).map((_, i) => {
-        const x = 30 + (i % 7) * 24;
-        const y = 40 + Math.floor(i / 7) * 24;
-        const filled = [0,1,2,4,7,8,9,14,15,16,17,21,22,23,28,29].includes(i);
-        return <rect key={i} x={x} y={y} width="18" height="18" rx="4"
-                     fill={filled ? hue : 'none'}
-                     stroke={filled ? 'none' : '#2B1F17'}
-                     strokeWidth="1" opacity={filled ? 0.3 + (i%5)*0.15 : 0.3}/>;
-      })}
-      <text x="30" y="200" fontFamily="Fraunces" fontSize="14" fontStyle="italic" fill="#2B1F17">16 days ⸱ quietly</text>
-    </svg>
-  );
+if (id === 'notecards') return (
+  <svg {...common} viewBox="0 0 220 220">
+    {[
+      { x: 30, y: 50, rot: -6 },
+      { x: 70, y: 40, rot: 3 },
+      { x: 110, y: 55, rot: -2 },
+    ].map((c, i) => (
+      <g key={i} transform={`rotate(${c.rot} ${c.x + 40} ${c.y + 50})`}>
+        <rect x={c.x} y={c.y} width="80" height="100" rx="6"
+              fill="#FFFDFA" stroke="#2B1F17" strokeWidth="1.5"/>
+        <line x1={c.x + 10} y1={c.y + 20} x2={c.x + 60} y2={c.y + 20}
+              stroke={hue} strokeWidth="2"/>
+        {[40, 55, 70, 85].map((y, j) => (
+          <line key={j} x1={c.x + 10} y1={c.y + y}
+                x2={c.x + 70 - j*8} y2={c.y + y}
+                stroke="#2B1F17" strokeWidth="1" opacity={0.4 - j*0.05}/>
+        ))}
+      </g>
+    ))}
+  </svg>
+);
 
-  if (id === 'meals') return (
-    <svg {...common} viewBox="0 0 220 220">
-      <circle cx="110" cy="115" r="70" fill="#FFFDFA" stroke="#2B1F17" strokeWidth="1.5"/>
-      <circle cx="110" cy="115" r="55" fill="none" stroke="#2B1F17" strokeWidth="0.8" strokeDasharray="2 4"/>
-      <path d="M 110 60 A 55 55 0 0 1 155 140 L 110 115 Z" fill={hue} opacity="0.8"/>
-      <path d="M 155 140 A 55 55 0 0 1 80 155 L 110 115 Z" fill={hue} opacity="0.5"/>
-      <path d="M 80 155 A 55 55 0 0 1 110 60 L 110 115 Z" fill={hue} opacity="0.3"/>
-      <circle cx="110" cy="115" r="12" fill="#FFFDFA" stroke="#2B1F17" strokeWidth="1.5"/>
-      <text x="110" y="200" textAnchor="middle" fontFamily="Fraunces" fontSize="14" fontStyle="italic" fill="#2B1F17">today's plate</text>
-    </svg>
-  );
-
-  if (id === 'mood') return (
-    <svg {...common} viewBox="0 0 220 220">
-      <path d="M 20 140 Q 50 100 80 120 T 140 90 T 200 110"
-            stroke={hue} strokeWidth="2.5" fill="none" strokeLinecap="round"/>
-      <path d="M 20 140 Q 50 100 80 120 T 140 90 T 200 110 L 200 180 L 20 180 Z"
-            fill={hue} opacity="0.15"/>
-      {[[20,140],[80,120],[140,90],[200,110]].map(([x,y], i) => (
-        <g key={i}>
-          <circle cx={x} cy={y} r="5" fill="#FFFDFA" stroke={hue} strokeWidth="2"/>
-        </g>
-      ))}
-      <circle cx="170" cy="50" r="14" fill={hue}/>
-      <circle cx="166" cy="47" r="1.5" fill="#FFFDFA"/>
-      <circle cx="174" cy="47" r="1.5" fill="#FFFDFA"/>
-      <path d="M 164 53 Q 170 58 176 53" stroke="#FFFDFA" strokeWidth="1.5" fill="none" strokeLinecap="round"/>
-    </svg>
-  );
-
-  if (id === 'sleep') return (
-    <svg {...common} viewBox="0 0 220 220">
-      <defs>
-        <linearGradient id="night" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#2B1F17"/>
-          <stop offset="100%" stopColor={hue} stopOpacity="0.6"/>
-        </linearGradient>
-      </defs>
-      <rect x="20" y="30" width="180" height="140" rx="12" fill="url(#night)"/>
-      <path d="M 160 65 A 22 22 0 1 1 140 45 A 17 17 0 0 0 160 65 Z" fill="#F6F1EA"/>
-      {[[50,55,1],[75,80,1.5],[105,45,1],[130,95,1.2],[60,110,0.8],[95,120,1],[170,130,1.3]].map(([x,y,r], i) => (
-        <circle key={i} cx={x} cy={y} r={r} fill="#F6F1EA" opacity={0.4 + (i%3)*0.2}/>
-      ))}
-      <text x="110" y="195" textAnchor="middle" fontFamily="Fraunces" fontSize="14" fontStyle="italic" fill="#2B1F17">7h 42m</text>
-    </svg>
-  );
+if (id === 'diary') return (
+  <svg {...common} viewBox="0 0 220 220">
+    <rect x="30" y="35" width="160" height="160" rx="6" fill="#FFFDFA" stroke="#2B1F17" strokeWidth="1.5"/>
+    <rect x="30" y="35" width="160" height="28" fill={hue} opacity="0.15"/>
+    <text x="45" y="54" fontFamily="Fraunces" fontSize="14" fontStyle="italic" fill="#2B1F17">Thursday</text>
+    <circle cx="165" cy="49" r="4" fill={hue}/>
+    {[80, 100, 120, 140, 160, 180].map((y, i) => (
+      <line key={i} x1="45" y1={y} x2={185 - i*12} y2={y}
+            stroke="#2B1F17" strokeWidth="1" opacity={0.35 + (i%2)*0.2}/>
+    ))}
+    <path d="M 45 175 Q 60 170 75 176" stroke={hue} strokeWidth="1.5" fill="none"/>
+  </svg>
+);
 
   return null;
 };

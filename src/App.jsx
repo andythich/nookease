@@ -442,6 +442,1014 @@ const HomePage = ({ onSelect }) => (
   </div>
 );
 
+// ============================================================
+// ---------- Interactive panel pages (Planner / Journal / Workout)
+// ============================================================
+//
+// Each page is self-contained:
+//   • reads/writes its own slice of localStorage so data survives reloads
+//   • shares the warm palette (#F6F1EA bg, #FF7A45/#D94A20 accents)
+//   • uses the same .display / .mono / serif headings as the rest of the site
+//
+// Storage keys (all under one namespace so they're easy to wipe later):
+//   nookease:planner   -> array of events
+//   nookease:journal   -> { pages: [...], activeId: '...' }
+//   nookease:workout   -> array of cardio sessions
+// ------------------------------------------------------------
+
+const STORAGE = {
+  planner: 'nookease:planner',
+  journal: 'nookease:journal',
+  workout: 'nookease:workout',
+};
+
+const loadJSON = (key, fallback) => {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch { return fallback; }
+};
+const saveJSON = (key, value) => {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+};
+
+// Small reusable header that mirrors the FeaturePage breadcrumb/hero feel
+// but stays compact so the actual tool gets the room.
+const PanelHeader = ({ panel, onNav, subtitle }) => (
+  <div style={{ maxWidth: 1200, margin: '0 auto', padding: '20px 40px 24px' }}>
+    <button
+      onClick={() => onNav('home')}
+      className="mono"
+      style={{ color: '#8A7668', marginBottom: 18 }}
+    >
+      ← Index
+    </button>
+    <div style={{ display: 'flex', alignItems: 'baseline', gap: 18, flexWrap: 'wrap' }}>
+      <span className="mono" style={{ color: panel.hue }}>{panel.number} · Feature</span>
+      <h1 className="display" style={{
+        fontSize: 'clamp(48px, 7vw, 84px)',
+        fontWeight: 300, fontStyle: 'italic',
+        lineHeight: 0.95, letterSpacing: '-0.03em',
+        color: '#2B1F17',
+      }}>
+        {panel.label}.
+      </h1>
+    </div>
+    {subtitle && (
+      <p style={{ fontSize: 17, lineHeight: 1.5, color: '#5C4A3E', marginTop: 14, fontStyle: 'italic', maxWidth: 600 }}>
+        {subtitle}
+      </p>
+    )}
+  </div>
+);
+
+// ---------- Planner Page ----------
+// Weekly grid: rows = hourly time slots, columns = Mon–Sun.
+// User adds a (day, start, end, title) entry; it renders as a colored
+// block on the grid spanning the right rows. Click a block to delete it.
+const PlannerPage = ({ panel, onNav }) => {
+  const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  // 6 AM through 11 PM is enough for most people without making the grid huge
+  const HOURS = Array.from({ length: 18 }, (_, i) => i + 6); // 6..23
+
+  const [events, setEvents] = useState(() => loadJSON(STORAGE.planner, []));
+  const [draft, setDraft] = useState({
+    day: 'Mon', start: '09:00', end: '10:00', title: '',
+  });
+
+  useEffect(() => { saveJSON(STORAGE.planner, events); }, [events]);
+
+  const toMinutes = (hhmm) => {
+    const [h, m] = hhmm.split(':').map(Number);
+    return h * 60 + m;
+  };
+  const fmtHour = (h) => {
+    const period = h >= 12 ? 'pm' : 'am';
+    const display = h % 12 === 0 ? 12 : h % 12;
+    return `${display} ${period}`;
+  };
+
+  const addEvent = () => {
+    if (!draft.title.trim()) return;
+    if (toMinutes(draft.end) <= toMinutes(draft.start)) return;
+    setEvents(prev => [
+      ...prev,
+      { id: Date.now() + Math.random(), ...draft, title: draft.title.trim() },
+    ]);
+    setDraft({ ...draft, title: '' });
+  };
+
+  const removeEvent = (id) => {
+    setEvents(prev => prev.filter(e => e.id !== id));
+  };
+
+  // Each hour row is 56px tall; an event's vertical position/height is
+  // computed from its start/end relative to the first hour (6 AM).
+  const ROW_H = 56;
+  const gridStartMin = HOURS[0] * 60;
+
+  const eventStyle = (ev) => {
+    const top = (toMinutes(ev.start) - gridStartMin) / 60 * ROW_H;
+    const height = (toMinutes(ev.end) - toMinutes(ev.start)) / 60 * ROW_H;
+    return { top: top + 4, height: Math.max(height - 6, 22) };
+  };
+
+  return (
+    <div className="fade-up" style={{ paddingTop: 100, minHeight: '100vh' }}>
+      <PanelHeader panel={panel} onNav={onNav} subtitle="Lay the week out softly. Drop in what matters; leave room for what doesn't yet have a name." />
+
+      <div style={{ maxWidth: 1200, margin: '0 auto', padding: '0 40px 80px' }}>
+
+        {/* Add-event row */}
+        <div style={{
+          background: '#FFFDFA',
+          border: '1px solid rgba(43,31,23,0.08)',
+          borderRadius: 20,
+          padding: 20,
+          marginBottom: 28,
+          display: 'grid',
+          gridTemplateColumns: '1fr 110px 110px 110px auto',
+          gap: 12,
+          alignItems: 'end',
+          boxShadow: '0 2px 8px rgba(43,31,23,0.04)',
+        }}>
+          <div>
+            <label className="mono" style={{ color: '#8A7668', display: 'block', marginBottom: 6 }}>Title</label>
+            <input
+              value={draft.title}
+              onChange={e => setDraft({ ...draft, title: e.target.value })}
+              onKeyDown={e => { if (e.key === 'Enter') addEvent(); }}
+              placeholder="e.g. morning walk, deep work, call mom"
+              style={inputStyle}
+            />
+          </div>
+          <div>
+            <label className="mono" style={{ color: '#8A7668', display: 'block', marginBottom: 6 }}>Day</label>
+            <select
+              value={draft.day}
+              onChange={e => setDraft({ ...draft, day: e.target.value })}
+              style={inputStyle}
+            >
+              {DAYS.map(d => <option key={d} value={d}>{d}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="mono" style={{ color: '#8A7668', display: 'block', marginBottom: 6 }}>Start</label>
+            <input
+              type="time"
+              value={draft.start}
+              onChange={e => setDraft({ ...draft, start: e.target.value })}
+              style={inputStyle}
+            />
+          </div>
+          <div>
+            <label className="mono" style={{ color: '#8A7668', display: 'block', marginBottom: 6 }}>End</label>
+            <input
+              type="time"
+              value={draft.end}
+              onChange={e => setDraft({ ...draft, end: e.target.value })}
+              style={inputStyle}
+            />
+          </div>
+          <button
+            onClick={addEvent}
+            className="mono"
+            style={{
+              padding: '12px 20px',
+              borderRadius: 999,
+              background: panel.hue,
+              color: '#FFFDFA',
+              height: 44,
+              transition: 'transform 0.2s, box-shadow 0.2s',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = `0 8px 20px -8px ${panel.hue}88`; }}
+            onMouseLeave={e => { e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = 'none'; }}
+          >
+            Add +
+          </button>
+        </div>
+
+        {/* The grid */}
+        <div style={{
+          background: '#FFFDFA',
+          border: '1px solid rgba(43,31,23,0.08)',
+          borderRadius: 20,
+          overflow: 'hidden',
+          boxShadow: '0 2px 8px rgba(43,31,23,0.04)',
+        }}>
+          {/* Day header row */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: '70px repeat(7, 1fr)',
+            borderBottom: '1px solid rgba(43,31,23,0.08)',
+            background: 'rgba(255,122,69,0.04)',
+          }}>
+            <div /> {/* corner spacer */}
+            {DAYS.map(d => (
+              <div key={d} className="mono" style={{
+                padding: '14px 0',
+                textAlign: 'center',
+                color: '#2B1F17',
+                borderLeft: '1px solid rgba(43,31,23,0.06)',
+              }}>
+                {d}
+              </div>
+            ))}
+          </div>
+
+          {/* Body: time labels on left, day columns with absolutely-positioned events on the right */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: '70px repeat(7, 1fr)',
+            position: 'relative',
+          }}>
+            {/* Time-label column */}
+            <div>
+              {HOURS.map(h => (
+                <div key={h} className="mono" style={{
+                  height: ROW_H,
+                  display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-end',
+                  paddingRight: 10, paddingTop: 6,
+                  color: '#8A7668',
+                  borderBottom: '1px dashed rgba(43,31,23,0.06)',
+                  fontSize: 10,
+                }}>
+                  {fmtHour(h)}
+                </div>
+              ))}
+            </div>
+
+            {/* Each day column */}
+            {DAYS.map(day => {
+              const dayEvents = events.filter(e => e.day === day);
+              return (
+                <div key={day} style={{
+                  position: 'relative',
+                  borderLeft: '1px solid rgba(43,31,23,0.06)',
+                }}>
+                  {HOURS.map(h => (
+                    <div key={h} style={{
+                      height: ROW_H,
+                      borderBottom: '1px dashed rgba(43,31,23,0.06)',
+                    }}/>
+                  ))}
+                  {dayEvents.map(ev => (
+                    <button
+                      key={ev.id}
+                      onClick={() => {
+                        if (window.confirm(`Remove "${ev.title}"?`)) removeEvent(ev.id);
+                      }}
+                      title="Click to remove"
+                      style={{
+                        position: 'absolute',
+                        left: 4, right: 4,
+                        ...eventStyle(ev),
+                        background: panel.hue,
+                        color: '#FFFDFA',
+                        borderRadius: 8,
+                        padding: '6px 8px',
+                        fontSize: 12,
+                        textAlign: 'left',
+                        boxShadow: `0 4px 12px -4px ${panel.hue}aa`,
+                        overflow: 'hidden',
+                        display: 'flex', flexDirection: 'column',
+                        transition: 'transform 0.2s',
+                      }}
+                      onMouseEnter={e => e.currentTarget.style.transform = 'scale(1.02)'}
+                      onMouseLeave={e => e.currentTarget.style.transform = 'scale(1)'}
+                    >
+                      <span style={{ fontWeight: 600, lineHeight: 1.2 }}>{ev.title}</span>
+                      <span className="mono" style={{ opacity: 0.85, fontSize: 9, marginTop: 2 }}>
+                        {ev.start}–{ev.end}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <p className="mono" style={{ color: '#8A7668', marginTop: 16, textAlign: 'center' }}>
+          {events.length === 0
+            ? 'a quiet week. add your first block above.'
+            : `${events.length} ${events.length === 1 ? 'block' : 'blocks'} · click any to remove`}
+        </p>
+      </div>
+    </div>
+  );
+};
+
+// Shared input style for the planner / workout forms
+const inputStyle = {
+  width: '100%',
+  height: 44,
+  padding: '0 14px',
+  background: '#F6F1EA',
+  border: '1px solid rgba(43,31,23,0.1)',
+  borderRadius: 10,
+  fontSize: 14,
+  fontFamily: 'inherit',
+  color: '#2B1F17',
+  outline: 'none',
+};
+
+// ---------- Journal Page ----------
+// iPhone-Notes-style: a list of titled pages on the left, an editable
+// document on the right. Formatting toolbar (bold, italic, bullets, headings,
+// font size) acts on the contentEditable area via document.execCommand.
+//
+// execCommand is technically deprecated but is the simplest cross-browser
+// way to format contentEditable without a rich-text library, which we're
+// avoiding to stay dependency-light.
+const JournalPage = ({ panel, onNav }) => {
+  const [data, setData] = useState(() => {
+    const stored = loadJSON(STORAGE.journal, null);
+    if (stored && stored.pages && stored.pages.length) return stored;
+    const firstId = Date.now();
+    return {
+      pages: [{ id: firstId, title: 'untitled', html: '', updated: Date.now() }],
+      activeId: firstId,
+    };
+  });
+
+  const editorRef = useRef(null);
+  const activePage = data.pages.find(p => p.id === data.activeId) || data.pages[0];
+
+  // Persist on every change
+  useEffect(() => { saveJSON(STORAGE.journal, data); }, [data]);
+
+  // When you switch pages, swap the editor's HTML in (we keep it
+  // uncontrolled to avoid the cursor jumping while typing).
+  useEffect(() => {
+    if (editorRef.current && activePage) {
+      if (editorRef.current.innerHTML !== activePage.html) {
+        editorRef.current.innerHTML = activePage.html || '';
+      }
+    }
+  }, [data.activeId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const updateActive = (patch) => {
+    setData(d => ({
+      ...d,
+      pages: d.pages.map(p => p.id === d.activeId ? { ...p, ...patch, updated: Date.now() } : p),
+    }));
+  };
+
+  const newPage = () => {
+    const id = Date.now();
+    setData(d => ({
+      pages: [{ id, title: 'untitled', html: '', updated: Date.now() }, ...d.pages],
+      activeId: id,
+    }));
+  };
+
+  const deletePage = (id) => {
+    if (!window.confirm('Remove this page?')) return;
+    setData(d => {
+      const remaining = d.pages.filter(p => p.id !== id);
+      if (remaining.length === 0) {
+        const fid = Date.now();
+        return { pages: [{ id: fid, title: 'untitled', html: '', updated: Date.now() }], activeId: fid };
+      }
+      return { pages: remaining, activeId: remaining[0].id };
+    });
+  };
+
+  // execCommand wrapper. Re-focus the editor first so the command targets it.
+  const exec = (cmd, value = null) => {
+    editorRef.current?.focus();
+    document.execCommand(cmd, false, value);
+    // Capture the resulting HTML
+    if (editorRef.current) updateActive({ html: editorRef.current.innerHTML });
+  };
+
+  // Toolbar button helper
+  const TBtn = ({ onClick, children, title }) => (
+    <button
+      onClick={onClick}
+      title={title}
+      onMouseDown={e => e.preventDefault() /* keep editor focused */}
+      style={{
+        height: 34, minWidth: 34, padding: '0 10px',
+        borderRadius: 8,
+        background: 'transparent',
+        color: '#2B1F17',
+        fontSize: 13, fontWeight: 500,
+        transition: 'background 0.2s',
+      }}
+      onMouseEnter={e => e.currentTarget.style.background = 'rgba(43,31,23,0.06)'}
+      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+    >
+      {children}
+    </button>
+  );
+
+  const fmtDate = (ts) => {
+    const d = new Date(ts);
+    const today = new Date();
+    const sameDay = d.toDateString() === today.toDateString();
+    return sameDay
+      ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+      : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  };
+
+  return (
+    <div className="fade-up" style={{ paddingTop: 100, minHeight: '100vh' }}>
+      <PanelHeader panel={panel} onNav={onNav} subtitle="A page that listens. Write in fragments, lists, or long letters to no one." />
+
+      <div style={{ maxWidth: 1200, margin: '0 auto', padding: '0 40px 80px' }}>
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: '260px 1fr',
+          gap: 20,
+          background: '#FFFDFA',
+          border: '1px solid rgba(43,31,23,0.08)',
+          borderRadius: 20,
+          overflow: 'hidden',
+          boxShadow: '0 2px 8px rgba(43,31,23,0.04)',
+          minHeight: 600,
+        }}>
+
+          {/* Sidebar: list of pages */}
+          <div style={{
+            borderRight: '1px solid rgba(43,31,23,0.08)',
+            background: 'rgba(255,122,69,0.03)',
+            display: 'flex', flexDirection: 'column',
+          }}>
+            <button
+              onClick={newPage}
+              className="mono"
+              style={{
+                margin: 14,
+                padding: '10px 14px',
+                background: panel.hue,
+                color: '#FFFDFA',
+                borderRadius: 10,
+                textAlign: 'left',
+              }}
+            >
+              + New page
+            </button>
+            <div style={{ overflowY: 'auto', flex: 1 }}>
+              {data.pages.map(p => {
+                const isActive = p.id === data.activeId;
+                return (
+                  <div
+                    key={p.id}
+                    onClick={() => setData(d => ({ ...d, activeId: p.id }))}
+                    style={{
+                      padding: '12px 16px',
+                      borderLeft: `3px solid ${isActive ? panel.hue : 'transparent'}`,
+                      background: isActive ? 'rgba(255,122,69,0.08)' : 'transparent',
+                      cursor: 'pointer',
+                      transition: 'background 0.2s',
+                      position: 'relative',
+                    }}
+                    onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = 'rgba(43,31,23,0.03)'; }}
+                    onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}
+                  >
+                    <div style={{
+                      fontSize: 14, fontWeight: 500, color: '#2B1F17',
+                      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                      paddingRight: 24,
+                    }}>
+                      {p.title || 'untitled'}
+                    </div>
+                    <div className="mono" style={{ color: '#8A7668', fontSize: 10, marginTop: 4 }}>
+                      {fmtDate(p.updated)}
+                    </div>
+                    {isActive && data.pages.length > 1 && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); deletePage(p.id); }}
+                        title="Delete page"
+                        style={{
+                          position: 'absolute', top: 10, right: 10,
+                          width: 22, height: 22, borderRadius: 6,
+                          color: '#8A7668',
+                          fontSize: 14, lineHeight: 1,
+                        }}
+                      >
+                        ×
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Editor */}
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
+            {/* Title */}
+            <input
+              value={activePage.title}
+              onChange={e => updateActive({ title: e.target.value })}
+              placeholder="untitled"
+              className="display"
+              style={{
+                border: 'none', outline: 'none',
+                fontSize: 32, fontWeight: 400, fontStyle: 'italic',
+                letterSpacing: '-0.02em',
+                color: '#2B1F17',
+                padding: '24px 28px 8px',
+                background: 'transparent',
+                fontFamily: 'Fraunces, serif',
+              }}
+            />
+
+            {/* Toolbar */}
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 4,
+              padding: '6px 22px',
+              borderBottom: '1px solid rgba(43,31,23,0.08)',
+              flexWrap: 'wrap',
+            }}>
+              <select
+                onChange={e => exec('formatBlock', e.target.value)}
+                defaultValue=""
+                style={{
+                  height: 34, padding: '0 8px',
+                  background: 'transparent',
+                  border: '1px solid rgba(43,31,23,0.1)',
+                  borderRadius: 8,
+                  fontSize: 13, fontFamily: 'inherit',
+                  color: '#2B1F17',
+                }}
+                title="Heading style"
+              >
+                <option value="" disabled>Style</option>
+                <option value="P">Body</option>
+                <option value="H2">Heading</option>
+                <option value="H3">Subheading</option>
+              </select>
+
+              <select
+                onChange={e => {
+                  // Wrap the selection in a span with the chosen size.
+                  // We do this manually for finer control than execCommand fontSize gives.
+                  const px = e.target.value;
+                  if (!px) return;
+                  editorRef.current?.focus();
+                  document.execCommand('fontSize', false, '7');
+                  // Replace any size-7 fonts execCommand inserted with our chosen size
+                  const fonts = editorRef.current.querySelectorAll('font[size="7"]');
+                  fonts.forEach(f => {
+                    const span = document.createElement('span');
+                    span.style.fontSize = px + 'px';
+                    span.innerHTML = f.innerHTML;
+                    f.replaceWith(span);
+                  });
+                  if (editorRef.current) updateActive({ html: editorRef.current.innerHTML });
+                  e.target.value = '';
+                }}
+                defaultValue=""
+                style={{
+                  height: 34, padding: '0 8px',
+                  background: 'transparent',
+                  border: '1px solid rgba(43,31,23,0.1)',
+                  borderRadius: 8,
+                  fontSize: 13, fontFamily: 'inherit',
+                  color: '#2B1F17',
+                }}
+                title="Font size"
+              >
+                <option value="" disabled>Size</option>
+                <option value="13">Small</option>
+                <option value="16">Normal</option>
+                <option value="20">Large</option>
+                <option value="26">XL</option>
+              </select>
+
+              <span style={{ width: 1, height: 22, background: 'rgba(43,31,23,0.1)', margin: '0 6px' }}/>
+
+              <TBtn onClick={() => exec('bold')} title="Bold"><b>B</b></TBtn>
+              <TBtn onClick={() => exec('italic')} title="Italic"><i>I</i></TBtn>
+              <TBtn onClick={() => exec('underline')} title="Underline"><u>U</u></TBtn>
+
+              <span style={{ width: 1, height: 22, background: 'rgba(43,31,23,0.1)', margin: '0 6px' }}/>
+
+              <TBtn onClick={() => exec('insertUnorderedList')} title="Bullet list">• List</TBtn>
+              <TBtn onClick={() => exec('insertOrderedList')} title="Numbered list">1. List</TBtn>
+
+              <span style={{ width: 1, height: 22, background: 'rgba(43,31,23,0.1)', margin: '0 6px' }}/>
+
+              <TBtn onClick={() => exec('removeFormat')} title="Clear formatting">Clear</TBtn>
+            </div>
+
+            {/* The editable area */}
+            <div
+              ref={editorRef}
+              contentEditable
+              suppressContentEditableWarning
+              onInput={e => updateActive({ html: e.currentTarget.innerHTML })}
+              data-placeholder="start writing…"
+              style={{
+                flex: 1, minHeight: 420,
+                padding: '24px 28px 32px',
+                fontSize: 16, lineHeight: 1.65,
+                color: '#2B1F17',
+                outline: 'none',
+                fontFamily: 'Inter Tight, sans-serif',
+              }}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Inline styles for editor headings + placeholder */}
+      <style>{`
+        [contenteditable][data-placeholder]:empty::before {
+          content: attr(data-placeholder);
+          color: #8A7668;
+          font-style: italic;
+        }
+        [contenteditable] h2 {
+          font-family: 'Fraunces', serif;
+          font-style: italic;
+          font-size: 28px;
+          font-weight: 400;
+          letter-spacing: -0.02em;
+          margin: 18px 0 8px;
+          color: #2B1F17;
+        }
+        [contenteditable] h3 {
+          font-family: 'Fraunces', serif;
+          font-style: italic;
+          font-size: 22px;
+          font-weight: 400;
+          margin: 14px 0 6px;
+          color: #2B1F17;
+        }
+        [contenteditable] p { margin: 8px 0; }
+        [contenteditable] ul, [contenteditable] ol { padding-left: 24px; margin: 8px 0; }
+        [contenteditable] li { margin: 4px 0; }
+      `}</style>
+    </div>
+  );
+};
+
+// ---------- Workout Page ----------
+// Cardio-only logger: each session = { date, calories, miles, minutes }.
+// Below the form we render a hand-rolled SVG line/area chart of calories
+// over time. No chart library — keeps the bundle tiny and matches the
+// site's illustrated aesthetic.
+const WorkoutPage = ({ panel, onNav }) => {
+  const [sessions, setSessions] = useState(() =>
+    loadJSON(STORAGE.workout, []).sort((a, b) => a.date.localeCompare(b.date))
+  );
+  const today = new Date().toISOString().slice(0, 10);
+  const [draft, setDraft] = useState({
+    date: today, calories: '', miles: '', minutes: '',
+  });
+  const [metric, setMetric] = useState('calories'); // which series to chart
+
+  useEffect(() => { saveJSON(STORAGE.workout, sessions); }, [sessions]);
+
+  const addSession = () => {
+    const cal = parseFloat(draft.calories);
+    const mi = parseFloat(draft.miles);
+    const min = parseFloat(draft.minutes);
+    if (isNaN(cal) || isNaN(mi) || isNaN(min)) return;
+    if (cal < 0 || mi < 0 || min < 0) return;
+    const next = [...sessions, {
+      id: Date.now() + Math.random(),
+      date: draft.date,
+      calories: cal,
+      miles: mi,
+      minutes: min,
+    }].sort((a, b) => a.date.localeCompare(b.date));
+    setSessions(next);
+    setDraft({ date: today, calories: '', miles: '', minutes: '' });
+  };
+
+  const removeSession = (id) => {
+    setSessions(prev => prev.filter(s => s.id !== id));
+  };
+
+  // Stats
+  const totals = sessions.reduce((acc, s) => ({
+    calories: acc.calories + s.calories,
+    miles: acc.miles + s.miles,
+    minutes: acc.minutes + s.minutes,
+  }), { calories: 0, miles: 0, minutes: 0 });
+
+  // ---------- Chart ----------
+  // We plot one metric across all sessions in order. If everything is on
+  // the same date, we still show them in entry order.
+  const W = 880, H = 280, padL = 50, padR = 20, padT = 30, padB = 40;
+  const innerW = W - padL - padR;
+  const innerH = H - padT - padB;
+
+  const values = sessions.map(s => s[metric]);
+  const maxVal = Math.max(10, ...values); // avoid /0
+  const minVal = 0;
+
+  const xAt = (i) => sessions.length <= 1
+    ? padL + innerW / 2
+    : padL + (i / (sessions.length - 1)) * innerW;
+  const yAt = (v) => padT + innerH - ((v - minVal) / (maxVal - minVal)) * innerH;
+
+  // y-axis ticks
+  const ticks = 4;
+  const tickValues = Array.from({ length: ticks + 1 }, (_, i) => (maxVal / ticks) * i);
+
+  // Build the line + area paths
+  let linePath = '';
+  let areaPath = '';
+  if (sessions.length > 0) {
+    sessions.forEach((s, i) => {
+      const x = xAt(i), y = yAt(s[metric]);
+      linePath += (i === 0 ? `M ${x} ${y}` : ` L ${x} ${y}`);
+    });
+    if (sessions.length === 1) {
+      // Render a small horizontal segment so there's something visible
+      const x = xAt(0), y = yAt(sessions[0][metric]);
+      linePath = `M ${x - 20} ${y} L ${x + 20} ${y}`;
+      areaPath = `M ${x - 20} ${y} L ${x + 20} ${y} L ${x + 20} ${padT + innerH} L ${x - 20} ${padT + innerH} Z`;
+    } else {
+      const lastX = xAt(sessions.length - 1);
+      const firstX = xAt(0);
+      areaPath = linePath + ` L ${lastX} ${padT + innerH} L ${firstX} ${padT + innerH} Z`;
+    }
+  }
+
+  const metricLabels = { calories: 'calories burned', miles: 'miles', minutes: 'minutes' };
+
+  return (
+    <div className="fade-up" style={{ paddingTop: 100, minHeight: '100vh' }}>
+      <PanelHeader panel={panel} onNav={onNav} subtitle="Small motions, stacked. A gentle record of what your body did today." />
+
+      <div style={{ maxWidth: 1200, margin: '0 auto', padding: '0 40px 80px' }}>
+
+        {/* Add-session row */}
+        <div style={{
+          background: '#FFFDFA',
+          border: '1px solid rgba(43,31,23,0.08)',
+          borderRadius: 20,
+          padding: 20,
+          marginBottom: 28,
+          display: 'grid',
+          gridTemplateColumns: '140px 1fr 1fr 1fr auto',
+          gap: 12,
+          alignItems: 'end',
+          boxShadow: '0 2px 8px rgba(43,31,23,0.04)',
+        }}>
+          <div>
+            <label className="mono" style={{ color: '#8A7668', display: 'block', marginBottom: 6 }}>Date</label>
+            <input
+              type="date"
+              value={draft.date}
+              onChange={e => setDraft({ ...draft, date: e.target.value })}
+              style={inputStyle}
+            />
+          </div>
+          <div>
+            <label className="mono" style={{ color: '#8A7668', display: 'block', marginBottom: 6 }}>Calories</label>
+            <input
+              type="number"
+              inputMode="decimal"
+              min="0"
+              value={draft.calories}
+              onChange={e => setDraft({ ...draft, calories: e.target.value })}
+              placeholder="e.g. 320"
+              style={inputStyle}
+            />
+          </div>
+          <div>
+            <label className="mono" style={{ color: '#8A7668', display: 'block', marginBottom: 6 }}>Miles</label>
+            <input
+              type="number"
+              inputMode="decimal"
+              min="0"
+              step="0.1"
+              value={draft.miles}
+              onChange={e => setDraft({ ...draft, miles: e.target.value })}
+              placeholder="e.g. 2.4"
+              style={inputStyle}
+            />
+          </div>
+          <div>
+            <label className="mono" style={{ color: '#8A7668', display: 'block', marginBottom: 6 }}>Minutes</label>
+            <input
+              type="number"
+              inputMode="decimal"
+              min="0"
+              value={draft.minutes}
+              onChange={e => setDraft({ ...draft, minutes: e.target.value })}
+              placeholder="e.g. 28"
+              style={inputStyle}
+            />
+          </div>
+          <button
+            onClick={addSession}
+            className="mono"
+            style={{
+              padding: '12px 20px',
+              borderRadius: 999,
+              background: panel.hue,
+              color: '#FFFDFA',
+              height: 44,
+              transition: 'transform 0.2s, box-shadow 0.2s',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = `0 8px 20px -8px ${panel.hue}88`; }}
+            onMouseLeave={e => { e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = 'none'; }}
+          >
+            Log +
+          </button>
+        </div>
+
+        {/* Totals strip */}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(3, 1fr)',
+          gap: 16,
+          marginBottom: 28,
+        }}>
+          {[
+            { k: 'Total calories', v: Math.round(totals.calories).toLocaleString() },
+            { k: 'Total miles', v: totals.miles.toFixed(1) },
+            { k: 'Total minutes', v: Math.round(totals.minutes).toLocaleString() },
+          ].map(item => (
+            <div key={item.k} style={{
+              background: '#FFFDFA',
+              border: '1px solid rgba(43,31,23,0.08)',
+              borderRadius: 16,
+              padding: '20px 22px',
+              boxShadow: '0 2px 8px rgba(43,31,23,0.04)',
+            }}>
+              <div className="mono" style={{ color: '#8A7668' }}>{item.k}</div>
+              <div className="display" style={{
+                fontSize: 38, fontStyle: 'italic', fontWeight: 300,
+                letterSpacing: '-0.02em', color: '#2B1F17', marginTop: 6,
+              }}>
+                {item.v}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Chart */}
+        <div style={{
+          background: '#FFFDFA',
+          border: '1px solid rgba(43,31,23,0.08)',
+          borderRadius: 20,
+          padding: '24px 24px 16px',
+          marginBottom: 28,
+          boxShadow: '0 2px 8px rgba(43,31,23,0.04)',
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 12 }}>
+            <div>
+              <span className="mono" style={{ color: panel.hue }}>— Trend</span>
+              <div className="display" style={{
+                fontSize: 24, fontStyle: 'italic', fontWeight: 300,
+                color: '#2B1F17', marginTop: 4,
+              }}>
+                {metricLabels[metric]} over time
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 6, background: '#F6F1EA', padding: 4, borderRadius: 10 }}>
+              {['calories', 'miles', 'minutes'].map(m => (
+                <button
+                  key={m}
+                  onClick={() => setMetric(m)}
+                  className="mono"
+                  style={{
+                    padding: '6px 12px',
+                    borderRadius: 8,
+                    background: metric === m ? '#FFFDFA' : 'transparent',
+                    color: metric === m ? '#2B1F17' : '#8A7668',
+                    boxShadow: metric === m ? '0 1px 3px rgba(43,31,23,0.08)' : 'none',
+                    transition: 'all 0.2s',
+                  }}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {sessions.length === 0 ? (
+            <div style={{
+              height: 240,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              color: '#8A7668', fontStyle: 'italic',
+            }}>
+              log a session above to see the curve.
+            </div>
+          ) : (
+            <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
+              <defs>
+                <linearGradient id="wo-area" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={panel.hue} stopOpacity="0.35"/>
+                  <stop offset="100%" stopColor={panel.hue} stopOpacity="0"/>
+                </linearGradient>
+              </defs>
+
+              {/* Y-axis grid + labels */}
+              {tickValues.map((t, i) => {
+                const y = yAt(t);
+                return (
+                  <g key={i}>
+                    <line x1={padL} y1={y} x2={W - padR} y2={y}
+                          stroke="#2B1F17" strokeOpacity="0.06" strokeDasharray="3 4"/>
+                    <text x={padL - 8} y={y + 4} textAnchor="end"
+                          fontFamily="Inter Tight" fontSize="10" fill="#8A7668">
+                      {Math.round(t)}
+                    </text>
+                  </g>
+                );
+              })}
+
+              {/* X-axis baseline */}
+              <line x1={padL} y1={padT + innerH} x2={W - padR} y2={padT + innerH}
+                    stroke="#2B1F17" strokeOpacity="0.2"/>
+
+              {/* Area + line */}
+              <path d={areaPath} fill="url(#wo-area)"/>
+              <path d={linePath} fill="none" stroke={panel.hue} strokeWidth="2"
+                    strokeLinecap="round" strokeLinejoin="round"/>
+
+              {/* Points + x-axis date labels */}
+              {sessions.map((s, i) => {
+                const x = xAt(i), y = yAt(s[metric]);
+                // Show date label sparsely so they don't collide
+                const showLabel = sessions.length <= 8 ||
+                  i === 0 || i === sessions.length - 1 ||
+                  i % Math.ceil(sessions.length / 6) === 0;
+                const dateLabel = new Date(s.date + 'T00:00').toLocaleDateString([], { month: 'short', day: 'numeric' });
+                return (
+                  <g key={s.id}>
+                    <circle cx={x} cy={y} r="4" fill="#FFFDFA" stroke={panel.hue} strokeWidth="2"/>
+                    {showLabel && (
+                      <text x={x} y={padT + innerH + 18} textAnchor="middle"
+                            fontFamily="Inter Tight" fontSize="10" fill="#8A7668">
+                        {dateLabel}
+                      </text>
+                    )}
+                  </g>
+                );
+              })}
+            </svg>
+          )}
+        </div>
+
+        {/* Session list */}
+        {sessions.length > 0 && (
+          <div style={{
+            background: '#FFFDFA',
+            border: '1px solid rgba(43,31,23,0.08)',
+            borderRadius: 20,
+            overflow: 'hidden',
+            boxShadow: '0 2px 8px rgba(43,31,23,0.04)',
+          }}>
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: '1fr 1fr 1fr 1fr 50px',
+              padding: '14px 22px',
+              borderBottom: '1px solid rgba(43,31,23,0.08)',
+              background: 'rgba(255,122,69,0.04)',
+            }}>
+              {['Date', 'Calories', 'Miles', 'Minutes', ''].map(h => (
+                <div key={h} className="mono" style={{ color: '#8A7668' }}>{h}</div>
+              ))}
+            </div>
+            {[...sessions].reverse().map(s => (
+              <div key={s.id} style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr 1fr 1fr 50px',
+                padding: '14px 22px',
+                borderBottom: '1px solid rgba(43,31,23,0.04)',
+                alignItems: 'center',
+                fontSize: 14,
+                color: '#2B1F17',
+              }}>
+                <div>{new Date(s.date + 'T00:00').toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}</div>
+                <div>{Math.round(s.calories)}</div>
+                <div>{s.miles.toFixed(1)}</div>
+                <div>{Math.round(s.minutes)}</div>
+                <button
+                  onClick={() => removeSession(s.id)}
+                  title="Remove"
+                  style={{
+                    width: 28, height: 28, borderRadius: 6,
+                    color: '#8A7668', fontSize: 16,
+                    transition: 'background 0.2s, color 0.2s',
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.background = 'rgba(217,74,32,0.08)'; e.currentTarget.style.color = '#D94A20'; }}
+                  onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = '#8A7668'; }}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 // ---------- Feature Sub-page ----------
 const FeaturePage = ({ panelId, onNav }) => {
   const panel = PANELS.find(p => p.id === panelId);
@@ -1364,11 +2372,18 @@ export default function App() {
     <div className="grain" style={{ minHeight: '100vh' }}>
       <GlobalStyles/>
       <Nav onNav={navigate} current={route}/>
-      {route === 'home'
-        ? <HomePage onSelect={navigate}/>
-        : route === 'login'
-        ? <LoginPage onNav={navigate}/>
-        : <FeaturePage panelId={route} onNav={navigate}/>}
+      {(() => {
+        if (route === 'home') return <HomePage onSelect={navigate}/>;
+        if (route === 'login') return <LoginPage onNav={navigate}/>;
+        // The three interactive panels get their own dedicated pages.
+        // Notecards and diary still show the marketing teaser for now.
+        const panel = PANELS.find(p => p.id === route);
+        if (!panel) return <HomePage onSelect={navigate}/>;
+        if (route === 'planner') return <PlannerPage panel={panel} onNav={navigate}/>;
+        if (route === 'journal') return <JournalPage panel={panel} onNav={navigate}/>;
+        if (route === 'workout') return <WorkoutPage panel={panel} onNav={navigate}/>;
+        return <FeaturePage panelId={route} onNav={navigate}/>;
+      })()}
       <Companion currentRoute={route} onNav={navigate}/>
     </div>
   );

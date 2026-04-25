@@ -90,11 +90,18 @@ const GlobalStyles = () => (
     .display { font-family: 'Fraunces', serif; font-style: italic; }
     .mono { font-family: 'Inter Tight', monospace; letter-spacing: 0.08em; text-transform: uppercase; font-size: 11px; font-weight: 500; }
 
+    .grain {
+      /* Establishes a stacking context so .grain::before's negative z-index
+         is trapped under our content but still above the body background. */
+      position: relative;
+      z-index: 0;
+    }
+
     .grain::before {
       content: '';
       position: fixed; inset: 0;
       pointer-events: none;
-      z-index: 1; /* was 100, panels appear above the grain layer now */
+      z-index: -1; /* true background — under all panels, forms, and interactable UI */
       opacity: 0.35;
       mix-blend-mode: multiply;
       background-image: url("data:image/svg+xml;utf8,<svg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.17 0 0 0 0 0.12 0 0 0 0 0.09 0 0 0 0.25 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");

@@ -1,4 +1,32 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { supabase } from './supabase';
+
+// ---------- Auth hook ----------
+// Centralises auth state so any component can know who's signed in.
+// Subscribes to Supabase's onAuthStateChange so login/logout from anywhere
+// updates every consumer instantly.
+const useAuth = () => {
+  const [session, setSession] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    // Hydrate the initial session from local storage / network
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setLoading(false);
+    });
+
+    // Listen for sign-in / sign-out / token refresh events
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, sess) => {
+      setSession(sess);
+    });
+
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  return { session, user: session?.user || null, loading };
+};
+
 
 // ---------- Data ----------
 const PANELS = [
@@ -97,9 +125,22 @@ const GlobalStyles = () => (
 );
 
 // ---------- Nav ----------
-const Nav = ({ onNav, current }) => {
+const Nav = ({ onNav, current, user }) => {
   const isLogin = current === 'login';
   const isHome = current === 'home';
+
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    onNav('home');
+  };
+
+  // Pull a friendly first name out of metadata or email
+  const displayName = user
+    ? (user.user_metadata?.name?.split(' ')[0]
+        || user.user_metadata?.full_name?.split(' ')[0]
+        || user.email?.split('@')[0]
+        || 'you')
+    : null;
 
   return (
     <nav style={{
@@ -123,38 +164,73 @@ const Nav = ({ onNav, current }) => {
           {isHome ? 'Index' : isLogin ? 'Sign in' : `${PANELS.findIndex(p => p.id === current) + 1} / ${PANELS.length}`}
         </span>
 
-        {/* Log in — text button */}
-        {!isLogin && (
-          <button onClick={() => onNav('login')} className="mono" style={{
-            padding: '10px 4px',
-            color: '#2B1F17',
-            position: 'relative',
+        {/* Logged-out view: Log in text + Get Early Access button */}
+        {!user && !isLogin && (
+          <>
+            <button onClick={() => onNav('login')} className="mono" style={{
+              padding: '10px 4px',
+              color: '#2B1F17',
+              position: 'relative',
+            }}
+            onMouseEnter={e => e.currentTarget.querySelector('.underline').style.transform = 'scaleX(1)'}
+            onMouseLeave={e => e.currentTarget.querySelector('.underline').style.transform = 'scaleX(0)'}
+            >
+              Log in
+              <span className="underline" style={{
+                position: 'absolute', bottom: 6, left: 4, right: 4, height: 1,
+                background: '#2B1F17',
+                transform: 'scaleX(0)', transformOrigin: 'left',
+                transition: 'transform 0.3s cubic-bezier(0.2,0.8,0.2,1)',
+              }}/>
+            </button>
+            <button onClick={() => onNav('login')} className="mono" style={{
+              padding: '10px 18px',
+              border: '1px solid #2B1F17',
+              borderRadius: 999,
+              transition: 'all 0.3s',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = '#2B1F17'; e.currentTarget.style.color = '#F6F1EA'; }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = '#2B1F17'; }}
+            >
+              Get Early Access
+            </button>
+          </>
+        )}
+
+        {/* On the login page, just show a back-home link */}
+        {!user && isLogin && (
+          <button onClick={() => onNav('home')} className="mono" style={{
+            padding: '10px 18px',
+            border: '1px solid #2B1F17',
+            borderRadius: 999,
+            transition: 'all 0.3s',
           }}
-          onMouseEnter={e => e.currentTarget.querySelector('.underline').style.transform = 'scaleX(1)'}
-          onMouseLeave={e => e.currentTarget.querySelector('.underline').style.transform = 'scaleX(0)'}
+          onMouseEnter={e => { e.currentTarget.style.background = '#2B1F17'; e.currentTarget.style.color = '#F6F1EA'; }}
+          onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = '#2B1F17'; }}
           >
-            Log in
-            <span className="underline" style={{
-              position: 'absolute', bottom: 6, left: 4, right: 4, height: 1,
-              background: '#2B1F17',
-              transform: 'scaleX(0)', transformOrigin: 'left',
-              transition: 'transform 0.3s cubic-bezier(0.2,0.8,0.2,1)',
-            }}/>
+            ← Back home
           </button>
         )}
 
-        {/* Primary CTA */}
-        <button onClick={() => onNav(isLogin ? 'home' : 'home')} className="mono" style={{
-          padding: '10px 18px',
-          border: '1px solid #2B1F17',
-          borderRadius: 999,
-          transition: 'all 0.3s',
-        }}
-        onMouseEnter={e => { e.currentTarget.style.background = '#2B1F17'; e.currentTarget.style.color = '#F6F1EA'; }}
-        onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = '#2B1F17'; }}
-        >
-          {isHome ? 'Get Early Access' : isLogin ? '← Back home' : '← Back to Index'}
-        </button>
+        {/* Logged-in view: name + sign out */}
+        {user && (
+          <>
+            <span className="mono" style={{ color: '#5C4A3E' }}>
+              hi, {displayName.toLowerCase()}
+            </span>
+            <button onClick={handleSignOut} className="mono" style={{
+              padding: '10px 18px',
+              border: '1px solid #2B1F17',
+              borderRadius: 999,
+              transition: 'all 0.3s',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = '#2B1F17'; e.currentTarget.style.color = '#F6F1EA'; }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = '#2B1F17'; }}
+            >
+              Sign out
+            </button>
+          </>
+        )}
       </div>
     </nav>
   );
@@ -447,31 +523,23 @@ const HomePage = ({ onSelect }) => (
 // ============================================================
 //
 // Each page is self-contained:
-//   • reads/writes its own slice of localStorage so data survives reloads
+//   • reads/writes its own table in Supabase (RLS keeps it user-scoped)
 //   • shares the warm palette (#F6F1EA bg, #FF7A45/#D94A20 accents)
 //   • uses the same .display / .mono / serif headings as the rest of the site
-//
-// Storage keys (all under one namespace so they're easy to wipe later):
-//   nookease:planner   -> array of events
-//   nookease:journal   -> { pages: [...], activeId: '...' }
-//   nookease:workout   -> array of cardio sessions
 // ------------------------------------------------------------
 
-const STORAGE = {
-  planner: 'nookease:planner',
-  journal: 'nookease:journal',
-  workout: 'nookease:workout',
-};
-
-const loadJSON = (key, fallback) => {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch { return fallback; }
-};
-const saveJSON = (key, value) => {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
-};
+// Quiet loading state — used while a panel is fetching its data from Supabase
+const LoadingNote = ({ panel }) => (
+  <div style={{
+    maxWidth: 1200, margin: '0 auto', padding: '40px',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    minHeight: 280,
+  }}>
+    <span className="mono" style={{ color: panel?.hue || '#8A7668', animation: 'soft-pulse 2s ease-in-out infinite' }}>
+      gathering your things…
+    </span>
+  </div>
+);
 
 // Small reusable header that mirrors the FeaturePage breadcrumb/hero feel
 // but stays compact so the actual tool gets the room.
@@ -505,19 +573,42 @@ const PanelHeader = ({ panel, onNav, subtitle }) => (
 
 // ---------- Planner Page ----------
 // Weekly grid: rows = hourly time slots, columns = Mon–Sun.
-// User adds a (day, start, end, title) entry; it renders as a colored
-// block on the grid spanning the right rows. Click a block to delete it.
-const PlannerPage = ({ panel, onNav }) => {
+// Events live in Supabase (table: planner_events) and sync per user.
+// Click a block to delete it.
+const PlannerPage = ({ panel, onNav, user }) => {
   const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
   // 6 AM through 11 PM is enough for most people without making the grid huge
   const HOURS = Array.from({ length: 18 }, (_, i) => i + 6); // 6..23
 
-  const [events, setEvents] = useState(() => loadJSON(STORAGE.planner, []));
+  const [events, setEvents] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState({
     day: 'Mon', start: '09:00', end: '10:00', title: '',
   });
 
-  useEffect(() => { saveJSON(STORAGE.planner, events); }, [events]);
+  // Initial fetch
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase
+        .from('planner_events')
+        .select('*')
+        .order('created_at', { ascending: true });
+      if (cancelled) return;
+      if (error) {
+        console.error('Planner fetch error:', error);
+        setEvents([]);
+      } else {
+        // Map db column names to the shape our UI uses
+        setEvents((data || []).map(r => ({
+          id: r.id, day: r.day, start: r.start_time, end: r.end_time, title: r.title,
+        })));
+      }
+      setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [user]);
 
   const toMinutes = (hhmm) => {
     const [h, m] = hhmm.split(':').map(Number);
@@ -529,18 +620,38 @@ const PlannerPage = ({ panel, onNav }) => {
     return `${display} ${period}`;
   };
 
-  const addEvent = () => {
+  const addEvent = async () => {
     if (!draft.title.trim()) return;
     if (toMinutes(draft.end) <= toMinutes(draft.start)) return;
-    setEvents(prev => [
-      ...prev,
-      { id: Date.now() + Math.random(), ...draft, title: draft.title.trim() },
-    ]);
+    const row = {
+      user_id: user.id,
+      day: draft.day,
+      start_time: draft.start,
+      end_time: draft.end,
+      title: draft.title.trim(),
+    };
+    const { data, error } = await supabase
+      .from('planner_events')
+      .insert(row)
+      .select()
+      .single();
+    if (error) { console.error('Add event error:', error); return; }
+    setEvents(prev => [...prev, {
+      id: data.id, day: data.day, start: data.start_time, end: data.end_time, title: data.title,
+    }]);
     setDraft({ ...draft, title: '' });
   };
 
-  const removeEvent = (id) => {
+  const removeEvent = async (id) => {
+    // Optimistic update — the row removes immediately; if the server rejects,
+    // we put it back and show the error.
+    const before = events;
     setEvents(prev => prev.filter(e => e.id !== id));
+    const { error } = await supabase.from('planner_events').delete().eq('id', id);
+    if (error) {
+      console.error('Remove event error:', error);
+      setEvents(before);
+    }
   };
 
   // Each hour row is 56px tall; an event's vertical position/height is
@@ -558,6 +669,7 @@ const PlannerPage = ({ panel, onNav }) => {
     <div className="fade-up" style={{ paddingTop: 100, minHeight: '100vh' }}>
       <PanelHeader panel={panel} onNav={onNav} subtitle="Lay the week out softly. Drop in what matters; leave room for what doesn't yet have a name." />
 
+      {loading ? <LoadingNote panel={panel}/> : (
       <div style={{ maxWidth: 1200, margin: '0 auto', padding: '0 40px 80px' }}>
 
         {/* Add-event row */}
@@ -736,6 +848,7 @@ const PlannerPage = ({ panel, onNav }) => {
             : `${events.length} ${events.length === 1 ? 'block' : 'blocks'} · click any to remove`}
         </p>
       </div>
+      )}
     </div>
   );
 };
@@ -756,28 +869,67 @@ const inputStyle = {
 
 // ---------- Journal Page ----------
 // iPhone-Notes-style: a list of titled pages on the left, an editable
-// document on the right. Formatting toolbar (bold, italic, bullets, headings,
-// font size) acts on the contentEditable area via document.execCommand.
+// document on the right. Pages live in Supabase (table: journal_pages)
+// and sync per user. We debounce content updates to avoid hammering
+// the server on every keystroke.
 //
 // execCommand is technically deprecated but is the simplest cross-browser
 // way to format contentEditable without a rich-text library, which we're
 // avoiding to stay dependency-light.
-const JournalPage = ({ panel, onNav }) => {
-  const [data, setData] = useState(() => {
-    const stored = loadJSON(STORAGE.journal, null);
-    if (stored && stored.pages && stored.pages.length) return stored;
-    const firstId = Date.now();
-    return {
-      pages: [{ id: firstId, title: 'untitled', html: '', updated: Date.now() }],
-      activeId: firstId,
-    };
-  });
+const JournalPage = ({ panel, onNav, user }) => {
+  const [pages, setPages] = useState([]);
+  const [activeId, setActiveId] = useState(null);
+  const [loading, setLoading] = useState(true);
 
   const editorRef = useRef(null);
-  const activePage = data.pages.find(p => p.id === data.activeId) || data.pages[0];
+  const saveTimerRef = useRef(null);
+  const activePage = pages.find(p => p.id === activeId) || pages[0];
 
-  // Persist on every change
-  useEffect(() => { saveJSON(STORAGE.journal, data); }, [data]);
+  // Initial fetch — and create a starter page if the user has none yet
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase
+        .from('journal_pages')
+        .select('*')
+        .order('updated_at', { ascending: false });
+      if (cancelled) return;
+      if (error) {
+        console.error('Journal fetch error:', error);
+        setPages([]);
+        setLoading(false);
+        return;
+      }
+      if (!data || data.length === 0) {
+        // Brand-new user: insert a starter page so the UI has something to bind to
+        const { data: created, error: createErr } = await supabase
+          .from('journal_pages')
+          .insert({ user_id: user.id, title: 'untitled', html: '' })
+          .select()
+          .single();
+        if (createErr) {
+          console.error('Journal create error:', createErr);
+          setLoading(false);
+          return;
+        }
+        setPages([{
+          id: created.id, title: created.title, html: created.html,
+          updated: new Date(created.updated_at).getTime(),
+        }]);
+        setActiveId(created.id);
+      } else {
+        const mapped = data.map(r => ({
+          id: r.id, title: r.title, html: r.html,
+          updated: new Date(r.updated_at).getTime(),
+        }));
+        setPages(mapped);
+        setActiveId(mapped[0].id);
+      }
+      setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [user]);
 
   // When you switch pages, swap the editor's HTML in (we keep it
   // uncontrolled to avoid the cursor jumping while typing).
@@ -787,33 +939,77 @@ const JournalPage = ({ panel, onNav }) => {
         editorRef.current.innerHTML = activePage.html || '';
       }
     }
-  }, [data.activeId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Local update + debounced save to Supabase.
+  // We update local state immediately so typing is responsive, then
+  // push to Supabase 600ms after the user stops typing.
   const updateActive = (patch) => {
-    setData(d => ({
-      ...d,
-      pages: d.pages.map(p => p.id === d.activeId ? { ...p, ...patch, updated: Date.now() } : p),
-    }));
+    if (!activePage) return;
+    const now = Date.now();
+    setPages(prev => prev.map(p =>
+      p.id === activeId ? { ...p, ...patch, updated: now } : p
+    ));
+    // Debounce the network call
+    clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(async () => {
+      const { error } = await supabase
+        .from('journal_pages')
+        .update({
+          ...(patch.title !== undefined && { title: patch.title }),
+          ...(patch.html !== undefined && { html: patch.html }),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', activeId);
+      if (error) console.error('Journal save error:', error);
+    }, 600);
   };
 
-  const newPage = () => {
-    const id = Date.now();
-    setData(d => ({
-      pages: [{ id, title: 'untitled', html: '', updated: Date.now() }, ...d.pages],
-      activeId: id,
-    }));
+  const newPage = async () => {
+    const { data, error } = await supabase
+      .from('journal_pages')
+      .insert({ user_id: user.id, title: 'untitled', html: '' })
+      .select()
+      .single();
+    if (error) { console.error('New page error:', error); return; }
+    const newP = {
+      id: data.id, title: data.title, html: data.html,
+      updated: new Date(data.updated_at).getTime(),
+    };
+    setPages(prev => [newP, ...prev]);
+    setActiveId(data.id);
   };
 
-  const deletePage = (id) => {
+  const deletePage = async (id) => {
     if (!window.confirm('Remove this page?')) return;
-    setData(d => {
-      const remaining = d.pages.filter(p => p.id !== id);
-      if (remaining.length === 0) {
-        const fid = Date.now();
-        return { pages: [{ id: fid, title: 'untitled', html: '', updated: Date.now() }], activeId: fid };
+    const before = pages;
+    const remaining = pages.filter(p => p.id !== id);
+    setPages(remaining);
+    if (id === activeId) {
+      setActiveId(remaining[0]?.id || null);
+    }
+    const { error } = await supabase.from('journal_pages').delete().eq('id', id);
+    if (error) {
+      console.error('Delete page error:', error);
+      setPages(before);
+      return;
+    }
+    // If that was the last page, create a fresh blank one
+    if (remaining.length === 0) {
+      const { data: created } = await supabase
+        .from('journal_pages')
+        .insert({ user_id: user.id, title: 'untitled', html: '' })
+        .select()
+        .single();
+      if (created) {
+        const newP = {
+          id: created.id, title: created.title, html: created.html,
+          updated: new Date(created.updated_at).getTime(),
+        };
+        setPages([newP]);
+        setActiveId(created.id);
       }
-      return { pages: remaining, activeId: remaining[0].id };
-    });
+    }
   };
 
   // execCommand wrapper. Re-focus the editor first so the command targets it.
@@ -858,6 +1054,9 @@ const JournalPage = ({ panel, onNav }) => {
     <div className="fade-up" style={{ paddingTop: 100, minHeight: '100vh' }}>
       <PanelHeader panel={panel} onNav={onNav} subtitle="A page that listens. Write in fragments, lists, or long letters to no one." />
 
+      {(loading || !activePage) ? (
+        <LoadingNote panel={panel}/>
+      ) : (
       <div style={{ maxWidth: 1200, margin: '0 auto', padding: '0 40px 80px' }}>
         <div style={{
           display: 'grid',
@@ -892,12 +1091,12 @@ const JournalPage = ({ panel, onNav }) => {
               + New page
             </button>
             <div style={{ overflowY: 'auto', flex: 1 }}>
-              {data.pages.map(p => {
-                const isActive = p.id === data.activeId;
+              {pages.map(p => {
+                const isActive = p.id === activeId;
                 return (
                   <div
                     key={p.id}
-                    onClick={() => setData(d => ({ ...d, activeId: p.id }))}
+                    onClick={() => setActiveId(p.id)}
                     style={{
                       padding: '12px 16px',
                       borderLeft: `3px solid ${isActive ? panel.hue : 'transparent'}`,
@@ -919,7 +1118,7 @@ const JournalPage = ({ panel, onNav }) => {
                     <div className="mono" style={{ color: '#8A7668', fontSize: 10, marginTop: 4 }}>
                       {fmtDate(p.updated)}
                     </div>
-                    {isActive && data.pages.length > 1 && (
+                    {isActive && pages.length > 1 && (
                       <button
                         onClick={(e) => { e.stopPropagation(); deletePage(p.id); }}
                         title="Delete page"
@@ -1056,6 +1255,7 @@ const JournalPage = ({ panel, onNav }) => {
           </div>
         </div>
       </div>
+      )}
 
       {/* Inline styles for editor headings + placeholder */}
       <style>{`
@@ -1091,40 +1291,77 @@ const JournalPage = ({ panel, onNav }) => {
 
 // ---------- Workout Page ----------
 // Cardio-only logger: each session = { date, calories, miles, minutes }.
-// Below the form we render a hand-rolled SVG line/area chart of calories
-// over time. No chart library — keeps the bundle tiny and matches the
-// site's illustrated aesthetic.
-const WorkoutPage = ({ panel, onNav }) => {
-  const [sessions, setSessions] = useState(() =>
-    loadJSON(STORAGE.workout, []).sort((a, b) => a.date.localeCompare(b.date))
-  );
+// Sessions live in Supabase (table: workout_sessions) and sync per user.
+// Below the form we render a hand-rolled SVG line/area chart of the
+// chosen metric over time. No chart library — keeps the bundle tiny.
+const WorkoutPage = ({ panel, onNav, user }) => {
+  const [sessions, setSessions] = useState([]);
+  const [loading, setLoading] = useState(true);
   const today = new Date().toISOString().slice(0, 10);
   const [draft, setDraft] = useState({
     date: today, calories: '', miles: '', minutes: '',
   });
   const [metric, setMetric] = useState('calories'); // which series to chart
 
-  useEffect(() => { saveJSON(STORAGE.workout, sessions); }, [sessions]);
+  // Initial fetch
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase
+        .from('workout_sessions')
+        .select('*')
+        .order('date', { ascending: true });
+      if (cancelled) return;
+      if (error) {
+        console.error('Workout fetch error:', error);
+        setSessions([]);
+      } else {
+        setSessions((data || []).map(r => ({
+          id: r.id, date: r.date,
+          calories: Number(r.calories), miles: Number(r.miles), minutes: Number(r.minutes),
+        })));
+      }
+      setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [user]);
 
-  const addSession = () => {
+  const addSession = async () => {
     const cal = parseFloat(draft.calories);
     const mi = parseFloat(draft.miles);
     const min = parseFloat(draft.minutes);
     if (isNaN(cal) || isNaN(mi) || isNaN(min)) return;
     if (cal < 0 || mi < 0 || min < 0) return;
-    const next = [...sessions, {
-      id: Date.now() + Math.random(),
+    const row = {
+      user_id: user.id,
       date: draft.date,
       calories: cal,
       miles: mi,
       minutes: min,
-    }].sort((a, b) => a.date.localeCompare(b.date));
-    setSessions(next);
+    };
+    const { data, error } = await supabase
+      .from('workout_sessions')
+      .insert(row)
+      .select()
+      .single();
+    if (error) { console.error('Add session error:', error); return; }
+    const inserted = {
+      id: data.id, date: data.date,
+      calories: Number(data.calories), miles: Number(data.miles), minutes: Number(data.minutes),
+    };
+    setSessions(prev => [...prev, inserted].sort((a, b) => a.date.localeCompare(b.date)));
     setDraft({ date: today, calories: '', miles: '', minutes: '' });
   };
 
-  const removeSession = (id) => {
+  const removeSession = async (id) => {
+    const before = sessions;
     setSessions(prev => prev.filter(s => s.id !== id));
+    const { error } = await supabase.from('workout_sessions').delete().eq('id', id);
+    if (error) {
+      console.error('Remove session error:', error);
+      setSessions(before);
+    }
   };
 
   // Stats
@@ -1180,6 +1417,7 @@ const WorkoutPage = ({ panel, onNav }) => {
     <div className="fade-up" style={{ paddingTop: 100, minHeight: '100vh' }}>
       <PanelHeader panel={panel} onNav={onNav} subtitle="Small motions, stacked. A gentle record of what your body did today." />
 
+      {loading ? <LoadingNote panel={panel}/> : (
       <div style={{ maxWidth: 1200, margin: '0 auto', padding: '0 40px 80px' }}>
 
         {/* Add-session row */}
@@ -1446,6 +1684,7 @@ const WorkoutPage = ({ panel, onNav }) => {
           </div>
         )}
       </div>
+      )}
     </div>
   );
 };
@@ -1534,7 +1773,7 @@ const FeaturePage = ({ panelId, onNav }) => {
         <div style={{ maxWidth: 1200, margin: '0 auto', display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 40 }}>
           {[
             { k: 'Principle', v: 'Less, but thoughtful', t: 'No notifications, no streaks shaming you. Just the tool, when you want it.' },
-            { k: 'Privacy', v: 'Yours, locally', t: 'Everything stays on device by default. Export anytime, delete in one tap.' },
+            { k: 'Privacy', v: 'Yours, encrypted', t: 'Your data lives in your account, encrypted in transit and at rest. Export anytime, delete in one tap.' },
             { k: 'Design', v: 'Calm by default', t: 'Warm light mode, true dark mode, and a serif-forward reading experience.' },
           ].map((item, i) => (
             <div key={i}>
@@ -1597,13 +1836,87 @@ const LoginPage = ({ onNav }) => {
   const [form, setForm] = useState({ name: '', email: '', password: '' });
   const [focus, setFocus] = useState(null);
   const [showPw, setShowPw] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [notice, setNotice] = useState(null); // for "check your email" / reset confirmation
 
   const isSignup = mode === 'signup';
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    // Hook up to real auth later
-    alert(`${isSignup ? 'Sign up' : 'Log in'} submitted for ${form.email}`);
+    setError(null);
+    setNotice(null);
+    if (!form.email || !form.password) {
+      setError('Please enter your email and password.');
+      return;
+    }
+    setBusy(true);
+    try {
+      if (isSignup) {
+        const { data, error: err } = await supabase.auth.signUp({
+          email: form.email,
+          password: form.password,
+          options: {
+            data: form.name ? { name: form.name } : undefined,
+          },
+        });
+        if (err) {
+          setError(err.message);
+        } else if (data.user && !data.session) {
+          // Email confirmation is on — Supabase sent a verification email.
+          setNotice('Check your inbox to confirm your email. We\'ll see you soon.');
+        }
+        // If a session is returned immediately, the auth listener in App will route home.
+      } else {
+        const { error: err } = await supabase.auth.signInWithPassword({
+          email: form.email,
+          password: form.password,
+        });
+        if (err) setError(err.message);
+        // Successful login: the auth listener navigates home.
+      }
+    } catch (err) {
+      setError(err.message || 'Something went quietly wrong. Please try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleGoogle = async () => {
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    try {
+      const { error: err } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          // After Google sends them back, land them on the home page.
+          // Supabase parses the auth fragment and our listener picks it up.
+          redirectTo: window.location.origin,
+        },
+      });
+      if (err) setError(err.message);
+      // On success the browser is redirected away; nothing else to do.
+    } catch (err) {
+      setError(err.message || 'Google sign-in didn\'t respond. Please try again.');
+      setBusy(false);
+    }
+  };
+
+  const handleReset = async () => {
+    setError(null);
+    setNotice(null);
+    if (!form.email) {
+      setError('Enter your email above first, then tap "Forgot password" again.');
+      return;
+    }
+    setBusy(true);
+    const { error: err } = await supabase.auth.resetPasswordForEmail(form.email, {
+      redirectTo: window.location.origin,
+    });
+    setBusy(false);
+    if (err) setError(err.message);
+    else setNotice('If that email is registered, a reset link is on its way.');
   };
 
   const input = (name, type, placeholder, label) => {
@@ -1699,7 +2012,8 @@ const LoginPage = ({ onNav }) => {
         {/* Social auth */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <button
-            onClick={() => alert('Google auth would run here')}
+            onClick={handleGoogle}
+            disabled={busy}
             style={{
               padding: '16px 18px',
               background: '#FFFDFA',
@@ -1709,8 +2023,10 @@ const LoginPage = ({ onNav }) => {
               color: '#2B1F17',
               display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12,
               transition: 'all 0.25s',
+              opacity: busy ? 0.6 : 1,
+              cursor: busy ? 'wait' : 'pointer',
             }}
-            onMouseEnter={e => { e.currentTarget.style.borderColor = '#2B1F17'; e.currentTarget.style.transform = 'translateY(-1px)'; }}
+            onMouseEnter={e => { if (!busy) { e.currentTarget.style.borderColor = '#2B1F17'; e.currentTarget.style.transform = 'translateY(-1px)'; } }}
             onMouseLeave={e => { e.currentTarget.style.borderColor = 'rgba(43,31,23,0.12)'; e.currentTarget.style.transform = 'translateY(0)'; }}
           >
             <svg width="18" height="18" viewBox="0 0 18 18">
@@ -1720,27 +2036,6 @@ const LoginPage = ({ onNav }) => {
               <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z" fill="#EA4335"/>
             </svg>
             Continue with Google
-          </button>
-
-          <button
-            onClick={() => alert('Apple auth would run here')}
-            style={{
-              padding: '16px 18px',
-              background: '#2B1F17',
-              border: '1px solid #2B1F17',
-              borderRadius: 14,
-              fontSize: 15, fontWeight: 500,
-              color: '#F6F1EA',
-              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12,
-              transition: 'all 0.25s',
-            }}
-            onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-1px)'; }}
-            onMouseLeave={e => { e.currentTarget.style.transform = 'translateY(0)'; }}
-          >
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="#F6F1EA">
-              <path d="M14.94 9.56c-.02-2.06 1.68-3.05 1.76-3.1-.96-1.4-2.46-1.6-2.99-1.62-1.27-.13-2.48.75-3.13.75-.65 0-1.65-.73-2.71-.71-1.39.02-2.68.81-3.4 2.06-1.45 2.52-.37 6.25 1.04 8.3.69 1 1.51 2.12 2.58 2.08 1.04-.04 1.43-.67 2.68-.67s1.6.67 2.7.65c1.12-.02 1.82-1.01 2.5-2.02.79-1.16 1.11-2.29 1.13-2.35-.02-.01-2.17-.83-2.19-3.31zM12.9 3.5c.57-.69.96-1.66.85-2.61-.83.03-1.83.55-2.42 1.24-.53.61-.99 1.59-.87 2.53.93.07 1.87-.47 2.44-1.16z"/>
-            </svg>
-            Continue with Apple
           </button>
         </div>
 
@@ -1762,14 +2057,41 @@ const LoginPage = ({ onNav }) => {
 
           {!isSignup && (
             <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: -4 }}>
-              <button type="button" style={{ fontSize: 13, color: '#5C4A3E', fontStyle: 'italic' }}>
+              <button type="button" onClick={handleReset} style={{ fontSize: 13, color: '#5C4A3E', fontStyle: 'italic' }}>
                 Forgot password?
               </button>
             </div>
           )}
 
+          {/* Inline error / notice strip */}
+          {error && (
+            <div style={{
+              padding: '10px 14px',
+              background: 'rgba(217,74,32,0.08)',
+              border: '1px solid rgba(217,74,32,0.25)',
+              borderRadius: 10,
+              fontSize: 13, lineHeight: 1.4,
+              color: '#A8391A',
+            }}>
+              {error}
+            </div>
+          )}
+          {notice && (
+            <div style={{
+              padding: '10px 14px',
+              background: 'rgba(74,157,95,0.08)',
+              border: '1px solid rgba(74,157,95,0.25)',
+              borderRadius: 10,
+              fontSize: 13, lineHeight: 1.4,
+              color: '#2C6B40',
+            }}>
+              {notice}
+            </div>
+          )}
+
           <button
             type="submit"
+            disabled={busy}
             style={{
               marginTop: 8,
               padding: '16px 22px',
@@ -1779,14 +2101,18 @@ const LoginPage = ({ onNav }) => {
               fontSize: 15, fontWeight: 500,
               transition: 'all 0.25s',
               display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+              opacity: busy ? 0.7 : 1,
+              cursor: busy ? 'wait' : 'pointer',
             }}
-            onMouseEnter={e => { e.currentTarget.style.background = '#2B1F17'; }}
+            onMouseEnter={e => { if (!busy) e.currentTarget.style.background = '#2B1F17'; }}
             onMouseLeave={e => { e.currentTarget.style.background = '#D94A20'; }}
           >
-            {isSignup ? 'Create your account' : 'Enter NookEase'}
-            <svg width="14" height="14" viewBox="0 0 12 12" fill="none">
-              <path d="M2 6 L10 6 M7 3 L10 6 L7 9" stroke="#FFFDFA" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-            </svg>
+            {busy ? 'one moment…' : (isSignup ? 'Create your account' : 'Enter NookEase')}
+            {!busy && (
+              <svg width="14" height="14" viewBox="0 0 12 12" fill="none">
+                <path d="M2 6 L10 6 M7 3 L10 6 L7 9" stroke="#FFFDFA" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            )}
           </button>
         </form>
 
@@ -2005,7 +2331,7 @@ const GUIDE_SCREENS = {
     ],
   },
   privacy: {
-    message: "Your data stays on your device by default — encrypted and yours. You can export everything anytime, or delete it all in one tap. We never sell data.",
+    message: "Your data lives in your NookEase account — encrypted in transit, encrypted at rest, and yours. You can export everything anytime, or delete it all in one tap. We never sell data.",
     options: [
       { label: 'Sign up', navigate: 'login', next: 'navigated' },
       { label: 'Learn about the features', next: 'features' },
@@ -2362,16 +2688,55 @@ const Companion = ({ currentRoute, onNav }) => {
 // ---------- Root App ----------
 export default function App() {
   const [route, setRoute] = useState('home');
+  const { user, loading } = useAuth();
 
   const navigate = (to) => {
     setRoute(to);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  // After a successful sign-in, leave the login page automatically.
+  // Also handles the OAuth round-trip: Google sends the user back to "/",
+  // Supabase parses the URL fragment and fires onAuthStateChange,
+  // useAuth picks it up, and this effect clears any stale login route.
+  useEffect(() => {
+    if (user && route === 'login') {
+      setRoute('home');
+    }
+  }, [user, route]);
+
+  // Three interactive panels require an account. If a logged-out visitor
+  // clicks one of those panels in the carousel, send them to login.
+  const protectedRoutes = ['planner', 'journal', 'workout'];
+  useEffect(() => {
+    if (!loading && !user && protectedRoutes.includes(route)) {
+      setRoute('login');
+    }
+  }, [user, loading, route]);
+
+  // While we're checking the session on first load, show a quiet placeholder
+  // instead of flashing the home page. Keeps it from ever briefly showing
+  // logged-out UI to a logged-in user.
+  if (loading) {
+    return (
+      <div className="grain" style={{ minHeight: '100vh' }}>
+        <GlobalStyles/>
+        <div style={{
+          minHeight: '100vh',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <span className="mono" style={{ color: '#8A7668', animation: 'soft-pulse 2s ease-in-out infinite' }}>
+            opening the door…
+          </span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="grain" style={{ minHeight: '100vh' }}>
       <GlobalStyles/>
-      <Nav onNav={navigate} current={route}/>
+      <Nav onNav={navigate} current={route} user={user}/>
       {(() => {
         if (route === 'home') return <HomePage onSelect={navigate}/>;
         if (route === 'login') return <LoginPage onNav={navigate}/>;
@@ -2379,9 +2744,9 @@ export default function App() {
         // Notecards and diary still show the marketing teaser for now.
         const panel = PANELS.find(p => p.id === route);
         if (!panel) return <HomePage onSelect={navigate}/>;
-        if (route === 'planner') return <PlannerPage panel={panel} onNav={navigate}/>;
-        if (route === 'journal') return <JournalPage panel={panel} onNav={navigate}/>;
-        if (route === 'workout') return <WorkoutPage panel={panel} onNav={navigate}/>;
+        if (route === 'planner') return <PlannerPage panel={panel} onNav={navigate} user={user}/>;
+        if (route === 'journal') return <JournalPage panel={panel} onNav={navigate} user={user}/>;
+        if (route === 'workout') return <WorkoutPage panel={panel} onNav={navigate} user={user}/>;
         return <FeaturePage panelId={route} onNav={navigate}/>;
       })()}
       <Companion currentRoute={route} onNav={navigate}/>

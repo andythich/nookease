@@ -1696,6 +1696,945 @@ const WorkoutPage = ({ panel, onNav, user }) => {
   );
 };
 
+// ---------- Notecards Page ----------
+// Three internal views, switched via local state (no extra routing):
+//   • 'list'   — grid of all sets, with tag filter pills
+//   • 'detail' — one set: header + add-card row + card list + Study button
+//   • 'study'  — flashcard mode (flip or self-graded quiz), shuffled per session
+//
+// Two Supabase tables:
+//   notecard_sets (id, user_id, title, description, tags[], created_at)
+//   notecards     (id, set_id, user_id, front, back, position, created_at)
+// RLS scopes both to auth.uid() = user_id.
+const NotecardsPage = ({ panel, onNav, user }) => {
+  // Top-level view state — drives which sub-UI is rendered
+  const [view, setView] = useState('list');     // 'list' | 'detail' | 'study'
+  const [activeSetId, setActiveSetId] = useState(null);
+
+  // Data
+  const [sets, setSets] = useState([]);
+  const [cards, setCards] = useState([]);       // cards for the active set only
+  const [loading, setLoading] = useState(true);
+
+  // Tag filter on the list view ('' means show all)
+  const [tagFilter, setTagFilter] = useState('');
+
+  // Initial fetch — pull all sets for this user
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase
+        .from('notecard_sets')
+        .select('*')
+        .order('updated_at', { ascending: false });
+      if (cancelled) return;
+      if (error) {
+        console.error('Sets fetch error:', error);
+        setSets([]);
+      } else {
+        setSets((data || []).map(s => ({
+          id: s.id, title: s.title, description: s.description || '',
+          tags: s.tags || [],
+          updatedAt: new Date(s.updated_at).getTime(),
+        })));
+      }
+      setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [user]);
+
+  // When the user opens a set, fetch its cards
+  useEffect(() => {
+    if (!activeSetId) { setCards([]); return; }
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase
+        .from('notecards')
+        .select('*')
+        .eq('set_id', activeSetId)
+        .order('position', { ascending: true });
+      if (cancelled) return;
+      if (error) {
+        console.error('Cards fetch error:', error);
+        setCards([]);
+      } else {
+        setCards((data || []).map(c => ({
+          id: c.id, front: c.front, back: c.back, position: c.position,
+        })));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [activeSetId]);
+
+  const activeSet = sets.find(s => s.id === activeSetId);
+
+  // Build the tag pill bar from all tags across all sets, deduped + sorted.
+  // Hidden until at least one set has at least one tag.
+  const allTags = Array.from(new Set(sets.flatMap(s => s.tags))).sort();
+
+  const filteredSets = tagFilter
+    ? sets.filter(s => s.tags.includes(tagFilter))
+    : sets;
+
+  // ------- Set CRUD -------
+  const createSet = async () => {
+    const { data, error } = await supabase
+      .from('notecard_sets')
+      .insert({ user_id: user.id, title: 'untitled set', description: '', tags: [] })
+      .select()
+      .single();
+    if (error) { console.error('Create set error:', error); return; }
+    const newSet = {
+      id: data.id, title: data.title, description: data.description || '',
+      tags: data.tags || [],
+      updatedAt: new Date(data.updated_at).getTime(),
+    };
+    setSets(prev => [newSet, ...prev]);
+    // Jump straight into editing the new set
+    setActiveSetId(newSet.id);
+    setView('detail');
+  };
+
+  const updateSet = async (id, patch) => {
+    const before = sets;
+    setSets(prev => prev.map(s => s.id === id ? { ...s, ...patch, updatedAt: Date.now() } : s));
+    const { error } = await supabase
+      .from('notecard_sets')
+      .update({ ...patch, updated_at: new Date().toISOString() })
+      .eq('id', id);
+    if (error) {
+      console.error('Update set error:', error);
+      setSets(before);
+    }
+  };
+
+  const deleteSet = async (id) => {
+    if (!window.confirm('Delete this set and all its cards? This can\'t be undone.')) return;
+    const before = sets;
+    setSets(prev => prev.filter(s => s.id !== id));
+    if (activeSetId === id) { setActiveSetId(null); setView('list'); }
+    const { error } = await supabase.from('notecard_sets').delete().eq('id', id);
+    if (error) {
+      console.error('Delete set error:', error);
+      setSets(before);
+    }
+  };
+
+  // ------- Card CRUD -------
+  const addCard = async (front, back) => {
+    if (!front.trim() && !back.trim()) return;
+    const nextPos = cards.length > 0 ? Math.max(...cards.map(c => c.position)) + 1 : 0;
+    const { data, error } = await supabase
+      .from('notecards')
+      .insert({
+        set_id: activeSetId, user_id: user.id,
+        front: front.trim(), back: back.trim(), position: nextPos,
+      })
+      .select()
+      .single();
+    if (error) { console.error('Add card error:', error); return; }
+    setCards(prev => [...prev, {
+      id: data.id, front: data.front, back: data.back, position: data.position,
+    }]);
+  };
+
+  const updateCard = async (id, patch) => {
+    const before = cards;
+    setCards(prev => prev.map(c => c.id === id ? { ...c, ...patch } : c));
+    const { error } = await supabase.from('notecards').update(patch).eq('id', id);
+    if (error) {
+      console.error('Update card error:', error);
+      setCards(before);
+    }
+  };
+
+  const deleteCard = async (id) => {
+    const before = cards;
+    setCards(prev => prev.filter(c => c.id !== id));
+    const { error } = await supabase.from('notecards').delete().eq('id', id);
+    if (error) {
+      console.error('Delete card error:', error);
+      setCards(before);
+    }
+  };
+
+  // ------- Render -------
+  return (
+    <div className="fade-up" style={{ paddingTop: 100, minHeight: '100vh' }}>
+      <PanelHeader panel={panel} onNav={onNav} subtitle="Ideas, one at a time. Make a set, fill it slowly, study when ready." />
+
+      {loading ? <LoadingNote panel={panel}/> : (
+        view === 'list' ? (
+          <NotecardsList
+            sets={filteredSets}
+            allSetCount={sets.length}
+            allTags={allTags}
+            tagFilter={tagFilter}
+            setTagFilter={setTagFilter}
+            onCreate={createSet}
+            onOpen={(id) => { setActiveSetId(id); setView('detail'); }}
+            panel={panel}
+          />
+        ) : view === 'detail' ? (
+          <NotecardsDetail
+            set={activeSet}
+            cards={cards}
+            onBack={() => { setView('list'); setActiveSetId(null); }}
+            onUpdateSet={(patch) => updateSet(activeSet.id, patch)}
+            onDeleteSet={() => deleteSet(activeSet.id)}
+            onAddCard={addCard}
+            onUpdateCard={updateCard}
+            onDeleteCard={deleteCard}
+            onStudy={() => setView('study')}
+            panel={panel}
+          />
+        ) : (
+          <NotecardsStudy
+            set={activeSet}
+            cards={cards}
+            onBack={() => setView('detail')}
+            panel={panel}
+          />
+        )
+      )}
+    </div>
+  );
+};
+
+// ---------- Notecards: List view ----------
+// Grid of set tiles + tag filter pills. The grain on each tile is intentional:
+// they're soft cards, not boxes.
+const NotecardsList = ({ sets, allSetCount, allTags, tagFilter, setTagFilter, onCreate, onOpen, panel }) => {
+  const showTagBar = allTags.length > 0 && allSetCount > 0;
+
+  return (
+    <div style={{ maxWidth: 1200, margin: '0 auto', padding: '0 40px 80px' }}>
+
+      {/* Tag filter row */}
+      {showTagBar && (
+        <div style={{
+          display: 'flex', gap: 8, marginBottom: 28, flexWrap: 'wrap',
+          alignItems: 'center',
+        }}>
+          <span className="mono" style={{ color: '#8A7668', marginRight: 6 }}>filter:</span>
+          <TagPill label="all" active={tagFilter === ''} onClick={() => setTagFilter('')} hue={panel.hue}/>
+          {allTags.map(t => (
+            <TagPill key={t} label={t} active={tagFilter === t} onClick={() => setTagFilter(t)} hue={panel.hue}/>
+          ))}
+        </div>
+      )}
+
+      {/* Empty state */}
+      {allSetCount === 0 ? (
+        <div style={{
+          padding: '80px 40px',
+          textAlign: 'center',
+          background: '#FFFDFA',
+          border: '1px dashed rgba(43,31,23,0.15)',
+          borderRadius: 20,
+        }}>
+          <p className="display" style={{
+            fontSize: 32, fontWeight: 300, fontStyle: 'italic',
+            color: '#2B1F17', marginBottom: 24,
+          }}>
+            no sets yet. let's make one.
+          </p>
+          <button
+            onClick={onCreate}
+            className="mono"
+            style={{
+              padding: '14px 28px',
+              borderRadius: 999,
+              background: panel.hue,
+              color: '#FFFDFA',
+              fontSize: 12,
+            }}
+          >
+            + New set
+          </button>
+        </div>
+      ) : (
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))',
+          gap: 16,
+        }}>
+          {/* New set tile — always first */}
+          <button
+            onClick={onCreate}
+            style={{
+              minHeight: 180,
+              background: 'transparent',
+              border: '2px dashed rgba(43,31,23,0.18)',
+              borderRadius: 20,
+              padding: 24,
+              display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+              gap: 8, color: '#5C4A3E',
+              transition: 'all 0.25s',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = panel.hue; e.currentTarget.style.color = panel.hue; e.currentTarget.style.transform = 'translateY(-2px)'; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = 'rgba(43,31,23,0.18)'; e.currentTarget.style.color = '#5C4A3E'; e.currentTarget.style.transform = 'translateY(0)'; }}
+          >
+            <span style={{ fontSize: 32, fontWeight: 200 }}>+</span>
+            <span className="mono">New set</span>
+          </button>
+
+          {sets.map(s => (
+            <button
+              key={s.id}
+              onClick={() => onOpen(s.id)}
+              style={{
+                minHeight: 180,
+                background: '#FFFDFA',
+                border: '1px solid rgba(43,31,23,0.08)',
+                borderRadius: 20,
+                padding: '22px 24px',
+                textAlign: 'left',
+                display: 'flex', flexDirection: 'column',
+                gap: 10,
+                boxShadow: '0 2px 8px rgba(43,31,23,0.04)',
+                transition: 'all 0.25s',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-3px)'; e.currentTarget.style.boxShadow = `0 12px 28px -8px ${panel.hue}33`; }}
+              onMouseLeave={e => { e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = '0 2px 8px rgba(43,31,23,0.04)'; }}
+            >
+              <span className="display" style={{
+                fontSize: 24, fontWeight: 400, fontStyle: 'italic',
+                letterSpacing: '-0.02em', color: '#2B1F17',
+                lineHeight: 1.15,
+              }}>
+                {s.title || 'untitled set'}
+              </span>
+              {s.description && (
+                <p style={{ fontSize: 13, color: '#5C4A3E', lineHeight: 1.5, flex: 1 }}>
+                  {s.description}
+                </p>
+              )}
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 'auto' }}>
+                {s.tags.slice(0, 4).map(t => (
+                  <span key={t} className="mono" style={{
+                    padding: '3px 8px',
+                    background: 'rgba(255,122,69,0.08)',
+                    color: panel.hue,
+                    borderRadius: 999,
+                    fontSize: 9,
+                  }}>
+                    {t}
+                  </span>
+                ))}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {tagFilter && sets.length === 0 && (
+        <p className="mono" style={{ color: '#8A7668', textAlign: 'center', marginTop: 32 }}>
+          nothing tagged "{tagFilter}" yet.
+        </p>
+      )}
+    </div>
+  );
+};
+
+// Reusable pill button used in the tag filter row
+const TagPill = ({ label, active, onClick, hue }) => (
+  <button
+    onClick={onClick}
+    className="mono"
+    style={{
+      padding: '6px 14px',
+      borderRadius: 999,
+      background: active ? hue : '#FFFDFA',
+      color: active ? '#FFFDFA' : '#5C4A3E',
+      border: `1px solid ${active ? hue : 'rgba(43,31,23,0.1)'}`,
+      transition: 'all 0.2s',
+      fontSize: 10,
+    }}
+    onMouseEnter={e => { if (!active) { e.currentTarget.style.borderColor = hue; e.currentTarget.style.color = hue; } }}
+    onMouseLeave={e => { if (!active) { e.currentTarget.style.borderColor = 'rgba(43,31,23,0.1)'; e.currentTarget.style.color = '#5C4A3E'; } }}
+  >
+    {label}
+  </button>
+);
+
+// ---------- Notecards: Detail view ----------
+// Editable header (title, description, tags) + add-card row + card list.
+// Title/description use onBlur to save (one network call when you click away).
+const NotecardsDetail = ({ set, cards, onBack, onUpdateSet, onDeleteSet, onAddCard, onUpdateCard, onDeleteCard, onStudy, panel }) => {
+  // Local copies so typing is responsive; we sync to the parent state on blur.
+  const [titleDraft, setTitleDraft] = useState(set?.title || '');
+  const [descDraft, setDescDraft] = useState(set?.description || '');
+  const [tagDraft, setTagDraft] = useState(''); // input field for new tag
+  const [newCard, setNewCard] = useState({ front: '', back: '' });
+
+  // Resync local state if the underlying set changes (e.g., after a tag add)
+  useEffect(() => {
+    setTitleDraft(set?.title || '');
+    setDescDraft(set?.description || '');
+  }, [set?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (!set) return null;
+
+  const commitTagDraft = () => {
+    const t = tagDraft.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
+    if (!t) { setTagDraft(''); return; }
+    if (set.tags.includes(t)) { setTagDraft(''); return; }
+    onUpdateSet({ tags: [...set.tags, t] });
+    setTagDraft('');
+  };
+
+  const removeTag = (t) => {
+    onUpdateSet({ tags: set.tags.filter(x => x !== t) });
+  };
+
+  const handleAddCard = () => {
+    if (!newCard.front.trim() && !newCard.back.trim()) return;
+    onAddCard(newCard.front, newCard.back);
+    setNewCard({ front: '', back: '' });
+  };
+
+  return (
+    <div style={{ maxWidth: 1100, margin: '0 auto', padding: '0 40px 80px' }}>
+      <button
+        onClick={onBack}
+        className="mono"
+        style={{ color: '#8A7668', marginBottom: 24 }}
+      >
+        ← All sets
+      </button>
+
+      {/* Editable header */}
+      <div style={{
+        background: '#FFFDFA',
+        border: '1px solid rgba(43,31,23,0.08)',
+        borderRadius: 20,
+        padding: '28px 30px',
+        marginBottom: 24,
+        boxShadow: '0 2px 8px rgba(43,31,23,0.04)',
+      }}>
+        <input
+          value={titleDraft}
+          onChange={e => setTitleDraft(e.target.value)}
+          onBlur={() => { if (titleDraft !== set.title) onUpdateSet({ title: titleDraft || 'untitled set' }); }}
+          placeholder="untitled set"
+          className="display"
+          style={{
+            border: 'none', outline: 'none',
+            fontSize: 'clamp(32px, 5vw, 48px)', fontWeight: 300, fontStyle: 'italic',
+            letterSpacing: '-0.02em', color: '#2B1F17',
+            background: 'transparent', width: '100%',
+            fontFamily: 'Fraunces, serif',
+            marginBottom: 8,
+          }}
+        />
+        <textarea
+          value={descDraft}
+          onChange={e => setDescDraft(e.target.value)}
+          onBlur={() => { if (descDraft !== set.description) onUpdateSet({ description: descDraft }); }}
+          placeholder="add a quiet note about this set…"
+          rows={2}
+          style={{
+            border: 'none', outline: 'none',
+            fontSize: 15, lineHeight: 1.55,
+            color: '#5C4A3E', fontStyle: 'italic',
+            background: 'transparent', width: '100%',
+            fontFamily: 'inherit',
+            resize: 'none',
+            marginBottom: 14,
+          }}
+        />
+
+        {/* Tags */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span className="mono" style={{ color: '#8A7668', marginRight: 4 }}>tags:</span>
+          {set.tags.map(t => (
+            <span key={t} className="mono" style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              padding: '4px 8px 4px 10px',
+              background: 'rgba(255,122,69,0.08)',
+              color: panel.hue,
+              borderRadius: 999,
+              fontSize: 10,
+            }}>
+              {t}
+              <button onClick={() => removeTag(t)} title="Remove tag" style={{
+                color: panel.hue, opacity: 0.7, fontSize: 14, lineHeight: 1, padding: '0 2px',
+              }}>×</button>
+            </span>
+          ))}
+          <input
+            value={tagDraft}
+            onChange={e => setTagDraft(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter' || e.key === ',' || e.key === ' ') { e.preventDefault(); commitTagDraft(); }
+              if (e.key === 'Backspace' && !tagDraft && set.tags.length > 0) { removeTag(set.tags[set.tags.length - 1]); }
+            }}
+            onBlur={commitTagDraft}
+            placeholder={set.tags.length === 0 ? 'add a tag…' : '+'}
+            className="mono"
+            style={{
+              border: 'none', outline: 'none',
+              background: 'transparent',
+              fontSize: 10, color: '#2B1F17',
+              fontFamily: 'inherit',
+              minWidth: 80, padding: '4px 0',
+            }}
+          />
+        </div>
+
+        {/* Set-level actions */}
+        <div style={{ display: 'flex', gap: 12, marginTop: 22, paddingTop: 18, borderTop: '1px solid rgba(43,31,23,0.06)' }}>
+          <button
+            onClick={onStudy}
+            disabled={cards.length === 0}
+            className="mono"
+            style={{
+              padding: '10px 22px',
+              borderRadius: 999,
+              background: cards.length === 0 ? 'rgba(43,31,23,0.1)' : panel.hue,
+              color: cards.length === 0 ? '#8A7668' : '#FFFDFA',
+              cursor: cards.length === 0 ? 'not-allowed' : 'pointer',
+              transition: 'transform 0.2s, box-shadow 0.2s',
+            }}
+            onMouseEnter={e => { if (cards.length > 0) { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = `0 8px 20px -8px ${panel.hue}88`; } }}
+            onMouseLeave={e => { e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = 'none'; }}
+          >
+            Study →
+          </button>
+          <span className="mono" style={{ color: '#8A7668', alignSelf: 'center' }}>
+            {cards.length} {cards.length === 1 ? 'card' : 'cards'}
+          </span>
+          <button
+            onClick={onDeleteSet}
+            className="mono"
+            style={{
+              padding: '10px 18px',
+              borderRadius: 999,
+              border: '1px solid rgba(43,31,23,0.12)',
+              color: '#8A7668',
+              marginLeft: 'auto',
+              transition: 'all 0.2s',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = '#D94A20'; e.currentTarget.style.color = '#D94A20'; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = 'rgba(43,31,23,0.12)'; e.currentTarget.style.color = '#8A7668'; }}
+          >
+            Delete set
+          </button>
+        </div>
+      </div>
+
+      {/* Add a card */}
+      <div style={{
+        background: '#FFFDFA',
+        border: '1px solid rgba(43,31,23,0.08)',
+        borderRadius: 20,
+        padding: 20,
+        marginBottom: 24,
+        display: 'grid',
+        gridTemplateColumns: '1fr 1fr auto',
+        gap: 12,
+        alignItems: 'end',
+        boxShadow: '0 2px 8px rgba(43,31,23,0.04)',
+      }}>
+        <div>
+          <label className="mono" style={{ color: '#8A7668', display: 'block', marginBottom: 6 }}>Front</label>
+          <input
+            value={newCard.front}
+            onChange={e => setNewCard({ ...newCard, front: e.target.value })}
+            onKeyDown={e => { if (e.key === 'Enter') handleAddCard(); }}
+            placeholder="the question, term, or prompt"
+            style={inputStyle}
+          />
+        </div>
+        <div>
+          <label className="mono" style={{ color: '#8A7668', display: 'block', marginBottom: 6 }}>Back</label>
+          <input
+            value={newCard.back}
+            onChange={e => setNewCard({ ...newCard, back: e.target.value })}
+            onKeyDown={e => { if (e.key === 'Enter') handleAddCard(); }}
+            placeholder="the answer, definition, or response"
+            style={inputStyle}
+          />
+        </div>
+        <button
+          onClick={handleAddCard}
+          className="mono"
+          style={{
+            padding: '12px 20px',
+            borderRadius: 999,
+            background: panel.hue,
+            color: '#FFFDFA',
+            height: 44,
+            transition: 'transform 0.2s, box-shadow 0.2s',
+          }}
+          onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = `0 8px 20px -8px ${panel.hue}88`; }}
+          onMouseLeave={e => { e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = 'none'; }}
+        >
+          Add card
+        </button>
+      </div>
+
+      {/* Card list */}
+      {cards.length === 0 ? (
+        <p className="mono" style={{ color: '#8A7668', textAlign: 'center', padding: '40px 0' }}>
+          no cards yet. add the first one above.
+        </p>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {cards.map((c, idx) => (
+            <CardRow
+              key={c.id}
+              index={idx + 1}
+              card={c}
+              onUpdate={(patch) => onUpdateCard(c.id, patch)}
+              onDelete={() => onDeleteCard(c.id)}
+              hue={panel.hue}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Inline-editable card row in the detail view
+const CardRow = ({ index, card, onUpdate, onDelete, hue }) => {
+  const [front, setFront] = useState(card.front);
+  const [back, setBack] = useState(card.back);
+
+  // Resync if the card changes from elsewhere
+  useEffect(() => { setFront(card.front); setBack(card.back); }, [card.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <div style={{
+      background: '#FFFDFA',
+      border: '1px solid rgba(43,31,23,0.08)',
+      borderRadius: 14,
+      padding: '14px 18px',
+      display: 'grid',
+      gridTemplateColumns: '40px 1fr 1fr 36px',
+      gap: 14,
+      alignItems: 'center',
+      boxShadow: '0 1px 3px rgba(43,31,23,0.03)',
+    }}>
+      <span className="mono" style={{ color: '#8A7668' }}>{String(index).padStart(2, '0')}</span>
+      <input
+        value={front}
+        onChange={e => setFront(e.target.value)}
+        onBlur={() => { if (front !== card.front) onUpdate({ front }); }}
+        placeholder="front"
+        style={{
+          border: 'none', outline: 'none', background: 'transparent',
+          fontSize: 14, color: '#2B1F17', width: '100%', fontFamily: 'inherit',
+        }}
+      />
+      <input
+        value={back}
+        onChange={e => setBack(e.target.value)}
+        onBlur={() => { if (back !== card.back) onUpdate({ back }); }}
+        placeholder="back"
+        style={{
+          border: 'none', outline: 'none', background: 'transparent',
+          fontSize: 14, color: '#5C4A3E', width: '100%', fontFamily: 'inherit',
+        }}
+      />
+      <button
+        onClick={onDelete}
+        title="Remove card"
+        style={{
+          width: 28, height: 28, borderRadius: 6,
+          color: '#8A7668', fontSize: 16,
+          transition: 'background 0.2s, color 0.2s',
+        }}
+        onMouseEnter={e => { e.currentTarget.style.background = 'rgba(217,74,32,0.08)'; e.currentTarget.style.color = '#D94A20'; }}
+        onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = '#8A7668'; }}
+      >
+        ×
+      </button>
+    </div>
+  );
+};
+
+// ---------- Notecards: Study view ----------
+// Two modes:
+//   • 'flip'  — click card to reveal the back
+//   • 'quiz'  — same flip, plus "got it" / "review again" buttons; tally at the end
+// Cards are shuffled once on entering the study session and stay in that order
+// until the user goes back and re-enters.
+const NotecardsStudy = ({ set, cards, onBack, panel }) => {
+  const [mode, setMode] = useState('flip'); // 'flip' | 'quiz'
+  const [order, setOrder] = useState([]);   // shuffled indices into `cards`
+  const [pos, setPos] = useState(0);
+  const [flipped, setFlipped] = useState(false);
+  const [grades, setGrades] = useState({}); // { cardId: 'correct' | 'review' }
+
+  // Shuffle on mount and whenever the cards array identity changes (e.g. user
+  // edits cards then comes back). Also reshuffles on "Restart".
+  const shuffle = () => {
+    const idx = cards.map((_, i) => i);
+    for (let i = idx.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [idx[i], idx[j]] = [idx[j], idx[i]];
+    }
+    setOrder(idx);
+    setPos(0);
+    setFlipped(false);
+    setGrades({});
+  };
+
+  useEffect(() => { shuffle(); }, [cards.length]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (!set || cards.length === 0 || order.length === 0) {
+    return (
+      <div style={{ maxWidth: 700, margin: '0 auto', padding: '20px 40px', textAlign: 'center' }}>
+        <p style={{ color: '#5C4A3E', fontStyle: 'italic' }}>no cards to study yet.</p>
+        <button onClick={onBack} className="mono" style={{ marginTop: 16, color: panel.hue }}>← Back</button>
+      </div>
+    );
+  }
+
+  const card = cards[order[pos]];
+  const isLast = pos === order.length - 1;
+  const done = isLast && flipped && (mode === 'flip' || grades[card.id]);
+
+  // For the quiz tally
+  const correctCount = Object.values(grades).filter(g => g === 'correct').length;
+  const reviewCount = Object.values(grades).filter(g => g === 'review').length;
+  const allGraded = mode === 'quiz' && Object.keys(grades).length === order.length;
+
+  const next = () => {
+    if (isLast) return;
+    setPos(p => p + 1);
+    setFlipped(false);
+  };
+  const prev = () => {
+    if (pos === 0) return;
+    setPos(p => p - 1);
+    setFlipped(false);
+  };
+
+  const grade = (verdict) => {
+    setGrades(g => ({ ...g, [card.id]: verdict }));
+    // Auto-advance after a brief moment
+    setTimeout(() => {
+      if (!isLast) { setPos(p => p + 1); setFlipped(false); }
+    }, 250);
+  };
+
+  return (
+    <div style={{ maxWidth: 760, margin: '0 auto', padding: '0 40px 80px' }}>
+
+      {/* Top row: back link + mode toggle + counter */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
+        <button onClick={onBack} className="mono" style={{ color: '#8A7668' }}>
+          ← {set.title || 'set'}
+        </button>
+        <div style={{ display: 'flex', gap: 6, background: '#F6F1EA', padding: 4, borderRadius: 10 }}>
+          {[{ k: 'flip', l: 'Flip' }, { k: 'quiz', l: 'Quiz' }].map(m => (
+            <button
+              key={m.k}
+              onClick={() => { setMode(m.k); setGrades({}); }}
+              className="mono"
+              style={{
+                padding: '6px 14px',
+                borderRadius: 8,
+                background: mode === m.k ? '#FFFDFA' : 'transparent',
+                color: mode === m.k ? '#2B1F17' : '#8A7668',
+                boxShadow: mode === m.k ? '0 1px 3px rgba(43,31,23,0.08)' : 'none',
+                transition: 'all 0.2s',
+              }}
+            >
+              {m.l}
+            </button>
+          ))}
+        </div>
+        <span className="mono" style={{ color: '#8A7668' }}>
+          {pos + 1} / {order.length}
+        </span>
+      </div>
+
+      {/* Quiz summary appears when every card has been graded */}
+      {allGraded ? (
+        <div style={{
+          background: '#FFFDFA',
+          border: '1px solid rgba(43,31,23,0.08)',
+          borderRadius: 24,
+          padding: '60px 40px',
+          textAlign: 'center',
+          boxShadow: '0 2px 8px rgba(43,31,23,0.04)',
+        }}>
+          <p className="mono" style={{ color: panel.hue, marginBottom: 14 }}>session complete</p>
+          <p className="display" style={{
+            fontSize: 'clamp(36px, 5vw, 56px)',
+            fontWeight: 300, fontStyle: 'italic',
+            letterSpacing: '-0.02em', color: '#2B1F17',
+            lineHeight: 1.05, marginBottom: 28,
+          }}>
+            {correctCount} of {order.length}.
+          </p>
+          <p style={{ color: '#5C4A3E', fontSize: 16, marginBottom: 32 }}>
+            {reviewCount === 0
+              ? 'a clean run. set it down and come back tomorrow.'
+              : `${reviewCount} to revisit. small motions, stacked.`}
+          </p>
+          <div style={{ display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap' }}>
+            <button
+              onClick={shuffle}
+              className="mono"
+              style={{
+                padding: '12px 24px', borderRadius: 999,
+                background: panel.hue, color: '#FFFDFA',
+                transition: 'transform 0.2s, box-shadow 0.2s',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = `0 8px 20px -8px ${panel.hue}88`; }}
+              onMouseLeave={e => { e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = 'none'; }}
+            >
+              Shuffle & study again
+            </button>
+            <button
+              onClick={onBack}
+              className="mono"
+              style={{
+                padding: '12px 24px', borderRadius: 999,
+                border: '1px solid rgba(43,31,23,0.15)', color: '#2B1F17',
+              }}
+            >
+              Back to set
+            </button>
+          </div>
+        </div>
+      ) : (
+        <>
+          {/* The card itself */}
+          <div
+            onClick={() => setFlipped(f => !f)}
+            style={{
+              background: '#FFFDFA',
+              border: `1px solid ${flipped ? panel.hue + '55' : 'rgba(43,31,23,0.08)'}`,
+              borderRadius: 24,
+              padding: '40px',
+              minHeight: 320,
+              display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center',
+              cursor: 'pointer',
+              boxShadow: flipped
+                ? `0 12px 32px -10px ${panel.hue}33`
+                : '0 2px 12px rgba(43,31,23,0.05)',
+              transition: 'all 0.3s cubic-bezier(0.2, 0.8, 0.2, 1)',
+              position: 'relative',
+              userSelect: 'none',
+            }}
+          >
+            <span className="mono" style={{
+              position: 'absolute', top: 18, left: 22,
+              color: flipped ? panel.hue : '#8A7668',
+              transition: 'color 0.3s',
+            }}>
+              {flipped ? 'back' : 'front'}
+            </span>
+            <p className="display" style={{
+              fontSize: 'clamp(28px, 4vw, 42px)',
+              fontWeight: 300, fontStyle: flipped ? 'italic' : 'normal',
+              letterSpacing: '-0.01em',
+              color: '#2B1F17',
+              textAlign: 'center', lineHeight: 1.25,
+              maxWidth: '90%',
+            }}>
+              {flipped ? (card.back || '—') : (card.front || '—')}
+            </p>
+            <span className="mono" style={{
+              position: 'absolute', bottom: 18, color: '#8A7668', fontSize: 9,
+            }}>
+              {flipped ? 'click to hide' : 'click to flip'}
+            </span>
+          </div>
+
+          {/* Controls under the card */}
+          <div style={{ marginTop: 24, display: 'flex', gap: 12, alignItems: 'center', justifyContent: 'center' }}>
+            <button
+              onClick={prev}
+              disabled={pos === 0}
+              className="mono"
+              style={{
+                padding: '10px 18px',
+                borderRadius: 999,
+                border: '1px solid rgba(43,31,23,0.12)',
+                color: pos === 0 ? 'rgba(43,31,23,0.3)' : '#2B1F17',
+                cursor: pos === 0 ? 'not-allowed' : 'pointer',
+              }}
+            >
+              ← Prev
+            </button>
+
+            {mode === 'quiz' && flipped ? (
+              <>
+                <button
+                  onClick={() => grade('review')}
+                  className="mono"
+                  style={{
+                    padding: '10px 20px', borderRadius: 999,
+                    border: '1px solid rgba(217,74,32,0.3)',
+                    background: grades[card.id] === 'review' ? '#D94A20' : 'transparent',
+                    color: grades[card.id] === 'review' ? '#FFFDFA' : '#D94A20',
+                    transition: 'all 0.2s',
+                  }}
+                >
+                  Review again
+                </button>
+                <button
+                  onClick={() => grade('correct')}
+                  className="mono"
+                  style={{
+                    padding: '10px 20px', borderRadius: 999,
+                    border: `1px solid ${panel.hue}55`,
+                    background: grades[card.id] === 'correct' ? panel.hue : 'transparent',
+                    color: grades[card.id] === 'correct' ? '#FFFDFA' : panel.hue,
+                    transition: 'all 0.2s',
+                  }}
+                >
+                  Got it ✓
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={next}
+                disabled={isLast}
+                className="mono"
+                style={{
+                  padding: '10px 18px',
+                  borderRadius: 999,
+                  background: isLast ? 'rgba(43,31,23,0.1)' : panel.hue,
+                  color: isLast ? '#8A7668' : '#FFFDFA',
+                  cursor: isLast ? 'not-allowed' : 'pointer',
+                }}
+              >
+                Next →
+              </button>
+            )}
+          </div>
+
+          {/* Quiz progress indicator */}
+          {mode === 'quiz' && Object.keys(grades).length > 0 && !allGraded && (
+            <div style={{ marginTop: 20, textAlign: 'center' }}>
+              <span className="mono" style={{ color: '#8A7668' }}>
+                {correctCount} got it · {reviewCount} to review
+              </span>
+            </div>
+          )}
+
+          {/* Reshuffle option, always available */}
+          <div style={{ textAlign: 'center', marginTop: 28 }}>
+            <button onClick={shuffle} className="mono" style={{ color: '#8A7668', fontStyle: 'italic' }}>
+              shuffle & restart
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+
 // ---------- Feature Sub-page ----------
 const FeaturePage = ({ panelId, onNav }) => {
   const panel = PANELS.find(p => p.id === panelId);
@@ -2714,7 +3653,7 @@ export default function App() {
 
   // Three interactive panels require an account. If a logged-out visitor
   // clicks one of those panels in the carousel, send them to login.
-  const protectedRoutes = ['planner', 'journal', 'workout'];
+  const protectedRoutes = ['planner', 'journal', 'workout', 'notecards'];
   useEffect(() => {
     if (!loading && !user && protectedRoutes.includes(route)) {
       setRoute('login');
@@ -2754,6 +3693,7 @@ export default function App() {
         if (route === 'planner') return <PlannerPage panel={panel} onNav={navigate} user={user}/>;
         if (route === 'journal') return <JournalPage panel={panel} onNav={navigate} user={user}/>;
         if (route === 'workout') return <WorkoutPage panel={panel} onNav={navigate} user={user}/>;
+        if (route === 'notecards') return <NotecardsPage panel={panel} onNav={navigate} user={user}/>;
         return <FeaturePage panelId={route} onNav={navigate}/>;
       })()}
       <Companion currentRoute={route} onNav={navigate}/>

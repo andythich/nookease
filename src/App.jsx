@@ -1839,6 +1839,35 @@ const NotecardsPage = ({ panel, onNav, user }) => {
     }]);
   };
 
+  // Bulk insert from CSV import. Returns a result object so the caller
+  // can show a success toast or surface an error inline.
+  const bulkAddCards = async (rows) => {
+    if (!rows || rows.length === 0) return { ok: false, count: 0, error: 'No rows to import.' };
+    const startPos = cards.length > 0 ? Math.max(...cards.map(c => c.position)) + 1 : 0;
+    const payload = rows.map((r, i) => ({
+      set_id: activeSetId,
+      user_id: user.id,
+      front: (r.front || '').trim(),
+      back: (r.back || '').trim(),
+      position: startPos + i,
+    }));
+    const { data, error } = await supabase
+      .from('notecards')
+      .insert(payload)
+      .select();
+    if (error) {
+      console.error('Bulk add error:', error);
+      return { ok: false, count: 0, error: error.message };
+    }
+    setCards(prev => [
+      ...prev,
+      ...(data || []).map(c => ({
+        id: c.id, front: c.front, back: c.back, position: c.position,
+      })),
+    ]);
+    return { ok: true, count: data?.length || 0 };
+  };
+
   const updateCard = async (id, patch) => {
     const before = cards;
     setCards(prev => prev.map(c => c.id === id ? { ...c, ...patch } : c));
@@ -1884,6 +1913,7 @@ const NotecardsPage = ({ panel, onNav, user }) => {
             onUpdateSet={(patch) => updateSet(activeSet.id, patch)}
             onDeleteSet={() => deleteSet(activeSet.id)}
             onAddCard={addCard}
+            onBulkAdd={bulkAddCards}
             onUpdateCard={updateCard}
             onDeleteCard={deleteCard}
             onStudy={() => setView('study')}
@@ -2062,12 +2092,20 @@ const TagPill = ({ label, active, onClick, hue }) => (
 // ---------- Notecards: Detail view ----------
 // Editable header (title, description, tags) + add-card row + card list.
 // Title/description use onBlur to save (one network call when you click away).
-const NotecardsDetail = ({ set, cards, onBack, onUpdateSet, onDeleteSet, onAddCard, onUpdateCard, onDeleteCard, onStudy, panel }) => {
+const NotecardsDetail = ({ set, cards, onBack, onUpdateSet, onDeleteSet, onAddCard, onBulkAdd, onUpdateCard, onDeleteCard, onStudy, panel }) => {
   // Local copies so typing is responsive; we sync to the parent state on blur.
   const [titleDraft, setTitleDraft] = useState(set?.title || '');
   const [descDraft, setDescDraft] = useState(set?.description || '');
   const [tagDraft, setTagDraft] = useState(''); // input field for new tag
   const [newCard, setNewCard] = useState({ front: '', back: '' });
+
+  // CSV import state — drives the preview modal that appears after file pick
+  const fileInputRef = useRef(null);
+  const [importPreview, setImportPreview] = useState(null);
+    // shape: { rows: [{front, back}, ...], filename: 'foo.csv', skipped: 0 }
+  const [importBusy, setImportBusy] = useState(false);
+  const [importMsg, setImportMsg] = useState(null);
+    // shape: { kind: 'success' | 'error', text: '...' }
 
   // Resync local state if the underlying set changes (e.g., after a tag add)
   useEffect(() => {
@@ -2093,6 +2131,111 @@ const NotecardsDetail = ({ set, cards, onBack, onUpdateSet, onDeleteSet, onAddCa
     if (!newCard.front.trim() && !newCard.back.trim()) return;
     onAddCard(newCard.front, newCard.back);
     setNewCard({ front: '', back: '' });
+  };
+
+  // ---------- CSV import ----------
+  // Parse a 2-column CSV (front,back). We hand-roll this rather than pull in
+  // Papa Parse because (a) we control the file format, (b) it keeps the
+  // bundle small, (c) the only tricky case is quoted fields with commas
+  // inside, which is ~15 lines of careful code.
+  const parseCSV = (text) => {
+    const rows = [];
+    let cur = [];           // current row's cells
+    let cell = '';          // current cell being built
+    let inQuotes = false;
+
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      const next = text[i + 1];
+
+      if (inQuotes) {
+        // Inside quotes: a pair of quotes means a literal quote, a single
+        // quote ends the quoted section. Everything else is content.
+        if (ch === '"' && next === '"') { cell += '"'; i++; }
+        else if (ch === '"') { inQuotes = false; }
+        else { cell += ch; }
+      } else {
+        if (ch === '"') { inQuotes = true; }
+        else if (ch === ',') { cur.push(cell); cell = ''; }
+        else if (ch === '\r') { /* ignore — \n handles row breaks */ }
+        else if (ch === '\n') {
+          cur.push(cell);
+          rows.push(cur);
+          cur = []; cell = '';
+        } else { cell += ch; }
+      }
+    }
+    // Final cell/row if file didn't end with a newline
+    if (cell !== '' || cur.length > 0) { cur.push(cell); rows.push(cur); }
+    return rows;
+  };
+
+  const handleFilePicked = (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // reset so the same file can be re-picked later
+    if (!file) return;
+    setImportMsg(null);
+
+    // Reasonable size cap — CSVs above 5MB are unusual for flashcards
+    // and start to chug the browser if we parse them on the main thread.
+    if (file.size > 5 * 1024 * 1024) {
+      setImportMsg({ kind: 'error', text: 'File is too large (over 5 MB). Try splitting it.' });
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const text = reader.result?.toString() || '';
+        const allRows = parseCSV(text);
+        if (allRows.length === 0) {
+          setImportMsg({ kind: 'error', text: 'No rows found in this file.' });
+          return;
+        }
+
+        // If row 0 looks like a header (cells equal "front" and "back",
+        // case-insensitive), drop it. Otherwise keep it as data.
+        const looksLikeHeader = allRows[0].length >= 2
+          && allRows[0][0].trim().toLowerCase() === 'front'
+          && allRows[0][1].trim().toLowerCase() === 'back';
+        const dataRows = looksLikeHeader ? allRows.slice(1) : allRows;
+
+        // Filter to rows that have at least front OR back (skip blank lines)
+        let skipped = 0;
+        const cards = dataRows
+          .map(r => ({ front: (r[0] || '').trim(), back: (r[1] || '').trim() }))
+          .filter(r => {
+            if (!r.front && !r.back) { skipped++; return false; }
+            return true;
+          });
+
+        if (cards.length === 0) {
+          setImportMsg({ kind: 'error', text: 'No usable cards found in this file.' });
+          return;
+        }
+        setImportPreview({ rows: cards, filename: file.name, skipped });
+      } catch (err) {
+        setImportMsg({ kind: 'error', text: 'Could not read this file as CSV.' });
+        console.error('CSV parse error:', err);
+      }
+    };
+    reader.onerror = () => {
+      setImportMsg({ kind: 'error', text: 'Could not read the file.' });
+    };
+    reader.readAsText(file);
+  };
+
+  const confirmImport = async () => {
+    if (!importPreview) return;
+    setImportBusy(true);
+    const result = await onBulkAdd(importPreview.rows);
+    setImportBusy(false);
+    setImportPreview(null);
+    if (result.ok) {
+      setImportMsg({ kind: 'success', text: `Added ${result.count} ${result.count === 1 ? 'card' : 'cards'}.` });
+    } else {
+      setImportMsg({ kind: 'error', text: result.error || 'Something went wrong during import.' });
+    }
   };
 
   return (
@@ -2206,6 +2349,32 @@ const NotecardsDetail = ({ set, cards, onBack, onUpdateSet, onDeleteSet, onAddCa
           <span className="mono" style={{ color: '#8A7668', alignSelf: 'center' }}>
             {cards.length} {cards.length === 1 ? 'card' : 'cards'}
           </span>
+
+          {/* Hidden file input — triggered by the Import button */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv,text/csv"
+            onChange={handleFilePicked}
+            style={{ display: 'none' }}
+          />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="mono"
+            style={{
+              padding: '10px 18px',
+              borderRadius: 999,
+              border: '1px solid rgba(43,31,23,0.12)',
+              color: '#5C4A3E',
+              marginLeft: 'auto',
+              transition: 'all 0.2s',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = panel.hue; e.currentTarget.style.color = panel.hue; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = 'rgba(43,31,23,0.12)'; e.currentTarget.style.color = '#5C4A3E'; }}
+          >
+            Import CSV
+          </button>
+
           <button
             onClick={onDeleteSet}
             className="mono"
@@ -2214,7 +2383,6 @@ const NotecardsDetail = ({ set, cards, onBack, onUpdateSet, onDeleteSet, onAddCa
               borderRadius: 999,
               border: '1px solid rgba(43,31,23,0.12)',
               color: '#8A7668',
-              marginLeft: 'auto',
               transition: 'all 0.2s',
             }}
             onMouseEnter={e => { e.currentTarget.style.borderColor = '#D94A20'; e.currentTarget.style.color = '#D94A20'; }}
@@ -2223,7 +2391,122 @@ const NotecardsDetail = ({ set, cards, onBack, onUpdateSet, onDeleteSet, onAddCa
             Delete set
           </button>
         </div>
+
+        {/* Inline import status (success / error toast that persists until next action) */}
+        {importMsg && (
+          <div style={{
+            marginTop: 14,
+            padding: '10px 14px',
+            background: importMsg.kind === 'success' ? 'rgba(74,157,95,0.08)' : 'rgba(217,74,32,0.08)',
+            border: `1px solid ${importMsg.kind === 'success' ? 'rgba(74,157,95,0.25)' : 'rgba(217,74,32,0.25)'}`,
+            borderRadius: 10,
+            fontSize: 13, lineHeight: 1.4,
+            color: importMsg.kind === 'success' ? '#2C6B40' : '#A8391A',
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+          }}>
+            <span>{importMsg.text}</span>
+            <button
+              onClick={() => setImportMsg(null)}
+              style={{ color: 'inherit', opacity: 0.6, fontSize: 16, lineHeight: 1, padding: '0 4px' }}
+              title="Dismiss"
+            >
+              ×
+            </button>
+          </div>
+        )}
       </div>
+
+      {/* Import preview modal — appears after a file is parsed */}
+      {importPreview && (
+        <div
+          onClick={() => !importBusy && setImportPreview(null)}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 200,
+            background: 'rgba(43,31,23,0.4)',
+            backdropFilter: 'blur(4px)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: 20,
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              background: '#FFFDFA',
+              borderRadius: 20,
+              padding: '32px 36px',
+              maxWidth: 520, width: '100%',
+              boxShadow: '0 20px 60px -10px rgba(43,31,23,0.4)',
+            }}
+          >
+            <p className="mono" style={{ color: panel.hue, marginBottom: 10 }}>preview</p>
+            <p className="display" style={{
+              fontSize: 28, fontWeight: 300, fontStyle: 'italic',
+              letterSpacing: '-0.02em', color: '#2B1F17',
+              lineHeight: 1.15, marginBottom: 14,
+            }}>
+              {importPreview.rows.length} {importPreview.rows.length === 1 ? 'card' : 'cards'} ready to add
+            </p>
+            <p style={{ fontSize: 14, color: '#5C4A3E', lineHeight: 1.55, marginBottom: 18 }}>
+              From <span style={{ color: '#2B1F17', fontFamily: 'monospace' }}>{importPreview.filename}</span>.
+              {importPreview.skipped > 0 && ` ${importPreview.skipped} blank ${importPreview.skipped === 1 ? 'row was' : 'rows were'} skipped.`}
+              {' '}They'll be appended to "{set.title || 'this set'}".
+            </p>
+
+            {/* Tiny preview of the first 3 cards */}
+            <div style={{
+              background: '#F6F1EA',
+              border: '1px solid rgba(43,31,23,0.06)',
+              borderRadius: 10,
+              padding: '10px 14px',
+              marginBottom: 22,
+              maxHeight: 160, overflowY: 'auto',
+            }}>
+              {importPreview.rows.slice(0, 3).map((r, i) => (
+                <div key={i} style={{ fontSize: 12, color: '#5C4A3E', padding: '4px 0', borderBottom: i < 2 && importPreview.rows.length > 1 ? '1px dashed rgba(43,31,23,0.08)' : 'none' }}>
+                  <span style={{ color: '#2B1F17' }}>{r.front.length > 60 ? r.front.slice(0, 60) + '…' : r.front}</span>
+                  <span style={{ color: '#8A7668' }}> → {r.back.length > 60 ? r.back.slice(0, 60) + '…' : r.back}</span>
+                </div>
+              ))}
+              {importPreview.rows.length > 3 && (
+                <div style={{ fontSize: 11, color: '#8A7668', fontStyle: 'italic', paddingTop: 6 }}>
+                  …and {importPreview.rows.length - 3} more.
+                </div>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => setImportPreview(null)}
+                disabled={importBusy}
+                className="mono"
+                style={{
+                  padding: '10px 18px',
+                  borderRadius: 999,
+                  border: '1px solid rgba(43,31,23,0.12)',
+                  color: '#5C4A3E',
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmImport}
+                disabled={importBusy}
+                className="mono"
+                style={{
+                  padding: '10px 22px',
+                  borderRadius: 999,
+                  background: panel.hue,
+                  color: '#FFFDFA',
+                  opacity: importBusy ? 0.7 : 1,
+                  cursor: importBusy ? 'wait' : 'pointer',
+                }}
+              >
+                {importBusy ? 'adding…' : `Add ${importPreview.rows.length}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Add a card */}
       <div style={{

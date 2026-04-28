@@ -2,7 +2,7 @@
 
 ## What this is
 
-NookEase is a calm, warm-toned wellness companion app at **nook-ease.com**. It's evolved from a teaser landing page into a working app: visitors see a marketing carousel, sign up with email or Google, and get three working features (Planner, Journal, Workout log). Notecards and Diary still show marketing teasers.
+NookEase is a calm, warm-toned wellness companion app at **nook-ease.com**. It's evolved from a teaser landing page into a working app: visitors see a marketing carousel, sign up with email or Google, and get four working features (Planner, Journal, Workout log, Notecards). Diary still shows a marketing teaser.
 
 Built with Vite + React, deployed on Vercel, code lives at `github.com/andythich/nookease`. Authentication and per-user data sync live in Supabase.
 
@@ -13,17 +13,17 @@ The aesthetic is intentional and worth preserving:
 - Quiet, slow, "small chunks of daily life" voice — never loud, never urgent
 - A companion character named **Ember** (scripted decision-tree chat, not LLM-backed) that appears bottom-corner
 
-## Current panels (post-edit)
+## Current panels
 
 The homepage has an auto-scrolling carousel of feature panels. There are five:
 
 1. **Planner** — "Order from the everyday" — INTERACTIVE (weekly grid)
 2. **Journal** — "A page that listens" — INTERACTIVE (iPhone-Notes-style with rich text)
 3. **Workout log** — "Small motions, stacked" — INTERACTIVE (cardio logger + chart)
-4. **Notecards** — "Ideas, one at a time" — still marketing teaser
+4. **Notecards** — "Ideas, one at a time" — INTERACTIVE (Quizlet-style, with CSV import)
 5. **Diary** — "The record of your days" — still marketing teaser
 
-Click a Planner / Journal / Workout panel while logged out → bounced to login. Notecards and Diary still go to the read-only `FeaturePage` teaser.
+Click a Planner / Journal / Workout / Notecards panel while logged out → bounced to login. Diary still goes to the read-only `FeaturePage` teaser.
 
 ## Tech stack
 
@@ -35,42 +35,49 @@ Click a Planner / Journal / Workout panel while logged out → bounced to login.
 - **Hosting:** Vercel (auto-deploys on push to `main`)
 - **Domain:** nook-ease.com (also www.nook-ease.com), DNS pointed at Vercel, free SSL via Vercel
 - **Repo:** `github.com/andythich/nookease`, single `main` branch
+- **Favicon:** Custom NookEase house mark in `public/favicon.svg` (replaced the default Vite lightning bolt)
 
 ## Project structure
 
 ```
 nookease/
-├── index.html              ← Vite entry, references /src/main.jsx
+├── index.html              ← Vite entry, references /src/main.jsx and /favicon.svg
 ├── package.json            ← includes @supabase/supabase-js
 ├── vite.config.js
 ├── vercel.json             ← explicit Vercel config (framework: vite, etc.)
 ├── .env.local              ← Supabase URL + anon key, NOT committed (in .gitignore)
 ├── public/
+│   └── favicon.svg         ← NookEase house mark (orange dot inside dark brown house)
 └── src/
     ├── main.jsx            ← React entry, mounts App
-    ├── App.jsx             ← THE WHOLE APP, ~2,750 lines
+    ├── App.jsx             ← THE WHOLE APP, ~3,985 lines
     ├── supabase.js         ← shared Supabase client (uses VITE_SUPABASE_* env vars)
     ├── index.css           ← emptied/minimal (Vite default removed)
     └── assets/
 ```
 
-**Important:** App.jsx is currently a single ~2,750-line monolith. User has been told this should eventually be split into separate component files but hasn't done so yet. Don't propose splitting unless asked.
+**Important:** App.jsx is currently a single ~3,985-line monolith. User has been told this should eventually be split into separate component files but hasn't done so yet. Don't propose splitting unless asked.
 
 ## Important file landmarks in App.jsx
 
-- **Lines ~5–28:** `useAuth` hook — wraps `supabase.auth.getSession()` and `onAuthStateChange`
-- **Lines ~30–93:** `PANELS` array — single source of truth for the homepage carousel
-- **Lines ~95–125:** `GlobalStyles` component with the `<style>` block (font imports, grain overlay, keyframes, base resets)
-- **Lines ~93–110:** Grain layer styles — `.grain` parent gets `position: relative; z-index: 0` to create a stacking context, `.grain::before` is at `z-index: -1` so it sits below ALL content
-- **Lines ~127–250:** `Nav` — receives `user` prop, conditionally shows "Log in / Get Early Access" (logged out) vs "hi, [name] / Sign out" (logged in)
-- **Lines ~280–390:** `PanelIllustration` — switch on `id` returning custom SVG per panel
-- **Lines ~395–425:** Carousel container with `scroll-x` keyframe animation
-- **Lines ~440–510:** `LoadingNote` and `PanelHeader` (shared by interactive panels)
-- **Lines ~515–840:** `PlannerPage` — fetches/inserts/deletes against `planner_events` table
-- **Lines ~870–1250:** `JournalPage` — fetches/inserts/updates/deletes against `journal_pages` table; uses `contentEditable` + `document.execCommand` for rich text (no editor library); 600ms debounced saves
-- **Lines ~1255–1665:** `WorkoutPage` — fetches/inserts/deletes against `workout_sessions` table; hand-rolled inline SVG chart (no Recharts)
-- **Lines ~1665–1785:** `FeaturePage` — marketing teaser for Notecards/Diary (no auth required)
-- **Lines ~1785–2085:** `LoginPage` — Supabase email/password + Google OAuth + forgot password
+Line numbers drift with edits — use them as a "look around here" hint, not exact addresses. Function names are stable.
+
+- **Top of file:** `useAuth` hook — wraps `supabase.auth.getSession()` and `onAuthStateChange`
+- **PANELS array** — single source of truth for the homepage carousel
+- **GlobalStyles component** — `<style>` block (font imports, grain overlay, keyframes, base resets)
+- **Grain layer styles** — `.grain` parent gets `position: relative; z-index: 0` to create a stacking context, `.grain::before` is at `z-index: -1` so it sits below ALL content
+- **Nav** — receives `user` prop, conditionally shows "Log in / Get Early Access" (logged out) vs "hi, [name] / Sign out" (logged in)
+- **PanelIllustration** — switch on `id` returning custom SVG per panel
+- **Carousel** — container with `scroll-x` keyframe animation
+- **LoadingNote and PanelHeader** — shared by interactive panels
+- **PlannerPage** — fetches/inserts/deletes against `planner_events` table
+- **JournalPage** — fetches/inserts/updates/deletes against `journal_pages` table; uses `contentEditable` + `document.execCommand` for rich text (no editor library); 600ms debounced saves
+- **WorkoutPage** — fetches/inserts/deletes against `workout_sessions` table; hand-rolled inline SVG chart (no Recharts)
+- **NotecardsPage** — three internal views (`list` | `detail` | `study`); fetches/inserts/updates/deletes against `notecard_sets` and `notecards` tables; supports CSV import
+- **NotecardsList / NotecardsDetail / NotecardsStudy** — sub-components for each view
+- **TagPill / CardRow** — small reusable sub-components for Notecards
+- **FeaturePage** — marketing teaser for Diary (no auth required)
+- **LoginPage** — Supabase email/password + Google OAuth + forgot password
 - **Companion (Ember):** scripted, choice-based. Each "node" has text and 2–4 option buttons. Not AI-backed.
 
 ## Supabase setup (already done)
@@ -81,9 +88,13 @@ nookease/
 planner_events    (id, user_id, day, start_time, end_time, title, created_at)
 journal_pages     (id, user_id, title, html, updated_at, created_at)
 workout_sessions  (id, user_id, date, calories, miles, minutes, created_at)
+notecard_sets     (id, user_id, title, description, tags[], created_at, updated_at)
+notecards         (id, set_id, user_id, front, back, position, created_at)
 ```
 
-Each table has a single RLS policy: `auth.uid() = user_id` for both `using` and `with check`. This is the database-level guarantee that user A cannot see/edit user B's rows even if there's a bug in frontend code. **If a row insert ever fails with "new row violates row-level security policy," the policies got dropped — re-run them.**
+Each table has a single RLS policy: `auth.uid() = user_id` for both `using` and `with check`. **If a row insert ever fails with "new row violates row-level security policy," the policies got dropped — re-run them.**
+
+`notecards.set_id` has `on delete cascade` so deleting a set automatically removes its cards. There's also an index on `notecards(set_id, position)` for ordered fetches.
 
 ### Auth providers enabled
 
@@ -112,19 +123,54 @@ Each table has a single RLS policy: `auth.uid() = user_id` for both `using` and 
 - Local dev: `cd nookease && npm run dev` → http://localhost:5173
 - Carousel, panel click, login page (email + Google), Ember chat all functional
 - Sign up / log in / sign out / forgot password
-- Planner, Journal, Workout all read/write from Supabase per user
+- Planner, Journal, Workout, Notecards all read/write from Supabase per user
 - Logged-out users hitting interactive panels get bounced to login
 - Grain texture sits below all interactive UI
+- Notecards CSV import (file picker → preview modal → bulk insert via single Supabase call)
+
+## Notecards feature details
+
+The Notecards page has three internal views, switched via local state:
+
+- **List view** — grid of set tiles + tag filter pills; "+ New set" tile is always first
+- **Detail view** — editable header (title, description, tags), add-card row, inline-editable card list, "Import CSV" button, "Delete set" button, "Study →" CTA
+- **Study view** — flip mode (click to reveal back) and quiz mode (self-graded with "Got it ✓" / "Review again"); shuffled per session; quiz mode shows a session-summary screen when all cards are graded
+
+### CSV import details
+
+- File picker accepts `.csv` files up to 5 MB
+- Hand-rolled CSV parser handles quoted fields with commas, escaped quotes (`""`), blank rows, and optional `front,back` header row
+- Preview modal shows count, filename, and first 3 cards before user confirms
+- Bulk insert via a single `.insert([...rows]).select()` Supabase call
+- Optimistic UI: cards appear immediately on confirm
+- Inline success ("Added 247 cards.") or error message persists in the header until dismissed
+
+### CSV format expected
+
+```csv
+front,back
+"What is the question?","The answer."
+"Question with, a comma","Answer."
+```
+
+Header row optional. Empty rows skipped.
+
+### Tags
+
+- Type a word in the tags input, hit Space/Enter/Comma to commit it as a pill
+- Backspace on empty input removes the last tag
+- Tags are normalized to lowercase, alphanumeric + hyphens only
+- The list view's tag filter bar appears only when at least one set has at least one tag
 
 ## What doesn't yet (future work the user has flagged interest in)
 
-- **Notecards and Diary** still show marketing teasers — need to be built out as interactive features (same pattern as the other three)
-- **"Get Early Access" button** currently goes to login — could collect emails for a waitlist instead via Formspree/ConvertKit if user wants a separate marketing list
-- **Apple OAuth** was removed from the login page (we didn't configure Apple Developer). Can be added back when user has an Apple Developer account.
+- **Diary** still shows a marketing teaser — needs to be built out as an interactive feature
+- **"Get Early Access" button** currently goes to login — could collect emails for a waitlist instead
+- **Apple OAuth** was removed from the login page (we didn't configure Apple Developer)
 - **Ember** is scripted; user may eventually want LLM-backed conversation (separate build)
 - **Code organization:** monolithic App.jsx should be split into `src/components/Nav.jsx`, `Companion.jsx`, etc.
-- **Favicon:** still the default Vite logo in `public/`. Needs replacement with NookEase mark.
 - **Export/delete account flows:** privacy copy promises "Export anytime, delete in one tap" — not actually implemented yet
+- **Notecards: drag-to-reorder cards** — currently they sort by `position` but there's no UI to reorder
 
 ## Known gotchas / lessons from the build
 
@@ -165,6 +211,12 @@ These all bit us at some point. If something is failing now, check these first:
 
 11. **Font size dropdown doesn't actually change size** → execCommand's `fontSize` only takes values 1–7 (HTML legacy). We work around this by calling execCommand with `7`, then walking the DOM to replace the resulting `<font size="7">` tags with `<span style="font-size: 16px">` (or 13/20/26).
 
+### Notecards
+
+12. **Possible CSV import quirk** — user reported being unable to import a second CSV into the same set on at least one occasion. Cause not yet identified. Suspects: file input value not resetting between picks (currently `e.target.value = ''` after pick), browser caching the file input state, or a silent Supabase RLS edge case. If it recurs, ask user to open DevTools console (F12) and check for errors before/during the second import. Workaround: combine multiple CSVs into one before importing, or refresh the page between imports.
+
+13. **Set tags can disappear if user types weirdly** — the tag input strips everything that isn't `[a-z0-9-]`. So uppercase becomes lowercase, but punctuation/spaces just get stripped silently. Worth flagging if a user is confused why their tag isn't being saved.
+
 ## How to make changes
 
 User's workflow: edit App.jsx locally → `git add . && git commit -m "..." && git push` → Vercel auto-redeploys in ~30 seconds. They run on Windows (cmd, not bash).
@@ -184,6 +236,15 @@ If asked to write new panel descriptions, taglines, or marketing copy, match the
 - Short sentences. Fragments are fine.
 - Em-dashes used sparingly, only where they earn it
 
+Examples of in-tone microcopy:
+- Empty state: "no sets yet. let's make one." (not "Get started!")
+- Description placeholder: "add a quiet note about this set…" (not "Description (optional)")
+- Quiz perfect run: "a clean run. set it down and come back tomorrow."
+- Loading: "gathering your things…" (not "Loading...")
+- Auth loading: "opening the door…"
+- Planner empty: "a quiet week. add your first block above."
+- Workout empty: "log a session above to see the curve."
+
 Privacy copy says **"Yours, encrypted"** — "Your data lives in your account, encrypted in transit and at rest. Export anytime, delete in one tap." Don't revert to "stays on device" wording — data does sync to Supabase now.
 
 ## Things NOT to do without asking
@@ -195,5 +256,6 @@ Privacy copy says **"Yours, encrypted"** — "Your data lives in your account, e
 - Don't make Ember "smarter" with an LLM — it's intentionally scripted right now
 - Don't add a charting library (Recharts, Chart.js, etc.) — the workout chart is hand-rolled SVG and matches the illustrated aesthetic
 - Don't add a rich text editor library (Tiptap, Slate, etc.) — the journal uses contentEditable + execCommand intentionally
+- Don't add a CSV parsing library (Papa Parse, etc.) — the Notecards importer hand-rolls a parser that handles quoted fields, escaped quotes, and blank rows in ~25 lines
 - Don't revert any of the z-index trickery on `.grain` (see gotcha #9)
 - Don't store sensitive data anywhere except Supabase, and don't add new tables without RLS policies

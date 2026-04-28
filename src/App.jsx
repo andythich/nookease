@@ -128,6 +128,52 @@ const GlobalStyles = () => (
     a { color: inherit; text-decoration: none; }
 
     ::selection { background: #FF7A45; color: #F6F1EA; }
+
+    /* Hide horizontal scrollbar on the JS-driven carousel */
+    .carousel-scroller::-webkit-scrollbar { display: none; }
+
+    /* Mobile breakpoint — keep things from clipping into each other on phones */
+    @media (max-width: 768px) {
+      /* Nav: tighter padding, smaller pieces, drop the index pill on tiny screens */
+      nav.site-nav { padding: 14px 18px !important; }
+      nav.site-nav .nav-actions { gap: 12px !important; }
+      nav.site-nav .nav-index { display: none !important; }
+      nav.site-nav .nav-cta-secondary { padding: 8px 12px !important; font-size: 10px !important; }
+      nav.site-nav .nav-greeting { display: none !important; }
+
+      /* Hero: tighter padding, allow the CTA buttons to wrap */
+      .home-hero { padding: 16px 20px 28px !important; }
+      .home-hero-row { gap: 24px !important; }
+      .home-hero-copy { max-width: 100% !important; padding-bottom: 0 !important; }
+      .home-hero-cta-row { flex-wrap: wrap !important; }
+      .home-hero-cta-row button { flex: 1 1 auto; }
+
+      /* Section label row: stack instead of crashing into each other */
+      .home-section-label {
+        padding: 28px 20px 0 !important;
+        flex-direction: column !important;
+        align-items: flex-start !important;
+        gap: 6px;
+      }
+
+      /* Footer strip: stack quote and copyright */
+      .home-footer {
+        padding: 36px 20px !important;
+        margin-top: 24px !important;
+        flex-direction: column !important;
+        align-items: flex-start !important;
+        gap: 16px;
+      }
+      .home-footer-quote { font-size: 22px !important; }
+
+      /* Ember launcher: smaller and tighter to the corner so it doesn't cover content */
+      .ember-launcher {
+        bottom: 16px !important;
+        right: 16px !important;
+        width: 52px !important;
+        height: 52px !important;
+      }
+    }
   `}</style>
 );
 
@@ -150,7 +196,7 @@ const Nav = ({ onNav, current, user }) => {
     : null;
 
   return (
-    <nav style={{
+    <nav className="site-nav" style={{
       position: 'fixed', top: 0, left: 0, right: 0, zIndex: 50,
       padding: '24px 40px',
       display: 'flex', justifyContent: 'space-between', alignItems: 'center',
@@ -166,8 +212,8 @@ const Nav = ({ onNav, current, user }) => {
           NookEase
         </span>
       </button>
-      <div style={{ display: 'flex', gap: 24, alignItems: 'center' }}>
-        <span className="mono" style={{ color: '#8A7668' }}>
+      <div className="nav-actions" style={{ display: 'flex', gap: 24, alignItems: 'center' }}>
+        <span className="mono nav-index" style={{ color: '#8A7668' }}>
           {isHome ? 'Index' : isLogin ? 'Sign in' : `${PANELS.findIndex(p => p.id === current) + 1} / ${PANELS.length}`}
         </span>
 
@@ -190,7 +236,7 @@ const Nav = ({ onNav, current, user }) => {
                 transition: 'transform 0.3s cubic-bezier(0.2,0.8,0.2,1)',
               }}/>
             </button>
-            <button onClick={() => onNav('login')} className="mono" style={{
+            <button onClick={() => onNav('login')} className="mono nav-cta-secondary" style={{
               padding: '10px 18px',
               border: '1px solid #2B1F17',
               borderRadius: 999,
@@ -206,7 +252,7 @@ const Nav = ({ onNav, current, user }) => {
 
         {/* On the login page, just show a back-home link */}
         {!user && isLogin && (
-          <button onClick={() => onNav('home')} className="mono" style={{
+          <button onClick={() => onNav('home')} className="mono nav-cta-secondary" style={{
             padding: '10px 18px',
             border: '1px solid #2B1F17',
             borderRadius: 999,
@@ -222,10 +268,10 @@ const Nav = ({ onNav, current, user }) => {
         {/* Logged-in view: name + sign out */}
         {user && (
           <>
-            <span className="mono" style={{ color: '#5C4A3E' }}>
+            <span className="mono nav-greeting" style={{ color: '#5C4A3E' }}>
               hi, {displayName.toLowerCase()}
             </span>
-            <button onClick={handleSignOut} className="mono" style={{
+            <button onClick={handleSignOut} className="mono nav-cta-secondary" style={{
               padding: '10px 18px',
               border: '1px solid #2B1F17',
               borderRadius: 999,
@@ -412,30 +458,145 @@ if (id === 'diary') return (
 
 // ---------- Carousel ----------
 const Carousel = ({ onSelect }) => {
-  const [paused, setPaused] = useState(false);
-  const doubled = [...PANELS, ...PANELS];
+  const scrollerRef = useRef(null);
+  const rafRef = useRef(null);
+  const lastTickRef = useRef(0);
+  const pauseUntilRef = useRef(0);
+  const dragRef = useRef({ active: false, startX: 0, startScroll: 0, moved: 0, pointerId: null });
+  const [hovered, setHovered] = useState(false);
+
+  // Triple the panels so we can wrap-around in either direction without a visible
+  // jump. We center on the middle copy and snap back when the user crosses an edge.
+  const tripled = [...PANELS, ...PANELS, ...PANELS];
+
+  // Auto-advance speed in pixels per second. Tuned to feel like the old 60s CSS
+  // animation (~30px/s for the typical PANELS length).
+  const SPEED_PX_PER_SEC = 30;
+
+  useEffect(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+
+    // Center on the middle copy after layout has settled.
+    const initId = requestAnimationFrame(() => {
+      el.scrollLeft = el.scrollWidth / 3;
+    });
+
+    // RAF loop: nudges scrollLeft forward when idle, snaps the wrap when the
+    // user (or the loop itself) crosses an edge copy.
+    const tick = (now) => {
+      const last = lastTickRef.current || now;
+      const dt = (now - last) / 1000;
+      lastTickRef.current = now;
+
+      const isPaused = hovered || dragRef.current.active || now < pauseUntilRef.current;
+      if (!isPaused && el) {
+        el.scrollLeft += SPEED_PX_PER_SEC * dt;
+      }
+
+      if (el) {
+        const third = el.scrollWidth / 3;
+        if (el.scrollLeft >= third * 2) el.scrollLeft -= third;
+        else if (el.scrollLeft < third * 0.5) el.scrollLeft += third;
+      }
+
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+
+    return () => {
+      cancelAnimationFrame(initId);
+      cancelAnimationFrame(rafRef.current);
+    };
+  }, [hovered]);
+
+  // Mouse wheel: vertical wheel scroll → horizontal carousel scroll. We only
+  // hijack when the wheel's dominant axis is vertical so trackpad horizontal
+  // gestures fall through to the browser's default.
+  const onWheel = (e) => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+      e.preventDefault();
+      el.scrollLeft += e.deltaY;
+      pauseUntilRef.current = performance.now() + 1200;
+    }
+  };
+
+  // Pointer events handle both mouse drag and touch swipe in one code path.
+  const onPointerDown = (e) => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    dragRef.current = {
+      active: true,
+      startX: e.clientX,
+      startScroll: el.scrollLeft,
+      moved: 0,
+      pointerId: e.pointerId,
+    };
+    el.setPointerCapture?.(e.pointerId);
+  };
+  const onPointerMove = (e) => {
+    const d = dragRef.current;
+    if (!d.active) return;
+    const dx = e.clientX - d.startX;
+    d.moved = Math.max(d.moved, Math.abs(dx));
+    const el = scrollerRef.current;
+    if (el) el.scrollLeft = d.startScroll - dx;
+  };
+  const endDrag = (e) => {
+    const d = dragRef.current;
+    if (!d.active) return;
+    d.active = false;
+    pauseUntilRef.current = performance.now() + 1200;
+    const el = scrollerRef.current;
+    if (el && d.pointerId != null) el.releasePointerCapture?.(d.pointerId);
+  };
+
+  // Suppress the click after a meaningful drag so dragging doesn't accidentally
+  // open a panel. 5px is the conventional threshold.
+  const handleSelect = (id) => {
+    if (dragRef.current.moved > 5) return;
+    onSelect(id);
+  };
 
   return (
     <div
-      onMouseEnter={() => setPaused(true)}
-      onMouseLeave={() => setPaused(false)}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
       style={{
         position: 'relative',
         width: '100%',
-        overflow: 'hidden',
         padding: '40px 0',
         maskImage: 'linear-gradient(to right, transparent, black 6%, black 94%, transparent)',
         WebkitMaskImage: 'linear-gradient(to right, transparent, black 6%, black 94%, transparent)',
       }}
     >
-      <div style={{
-        display: 'flex',
-        width: 'max-content',
-        animation: 'scroll-x 60s linear infinite',
-        animationPlayState: paused ? 'paused' : 'running',
-      }}>
-        {doubled.map((p, i) => (
-          <PanelCard key={`${p.id}-${i}`} panel={p} onClick={onSelect}/>
+      <div
+        ref={scrollerRef}
+        onWheel={onWheel}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        onPointerLeave={endDrag}
+        className="carousel-scroller"
+        style={{
+          display: 'flex',
+          width: '100%',
+          overflowX: 'auto',
+          overflowY: 'hidden',
+          scrollbarWidth: 'none',
+          msOverflowStyle: 'none',
+          // pan-y lets vertical page scroll work on mobile; we only hijack horizontal.
+          touchAction: 'pan-y',
+          cursor: 'grab',
+          userSelect: 'none',
+          WebkitUserSelect: 'none',
+        }}
+      >
+        {tripled.map((p, i) => (
+          <PanelCard key={`${p.id}-${i}`} panel={p} onClick={handleSelect}/>
         ))}
       </div>
     </div>
@@ -443,11 +604,14 @@ const Carousel = ({ onSelect }) => {
 };
 
 // ---------- Home Page ----------
-const HomePage = ({ onSelect }) => (
+const HomePage = ({ onSelect }) => {
+  const [filmOpen, setFilmOpen] = useState(false);
+
+  return (
   <div className="fade-up" style={{ paddingTop: 120, minHeight: '100vh' }}>
     {/* Hero text */}
-    <div style={{ maxWidth: 1200, margin: '0 auto', padding: '20px 40px 40px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'end', flexWrap: 'wrap', gap: 40 }}>
+    <div className="home-hero" style={{ maxWidth: 1200, margin: '0 auto', padding: '20px 40px 40px' }}>
+      <div className="home-hero-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'end', flexWrap: 'wrap', gap: 40 }}>
         <div style={{ maxWidth: 720 }}>
           <span className="mono" style={{
             display: 'inline-flex', alignItems: 'center', gap: 8,
@@ -470,12 +634,12 @@ const HomePage = ({ onSelect }) => (
             your day.
           </h1>
         </div>
-        <div style={{ maxWidth: 360, paddingBottom: 12 }}>
+        <div className="home-hero-copy" style={{ maxWidth: 360, paddingBottom: 12 }}>
           <p style={{ fontSize: 17, lineHeight: 1.55, color: '#5C4A3E' }}>
             NookEase is a gentle companion for the small rituals of daily life —
             planning, moving, writing, resting. One unhurried app, seven quiet rooms.
           </p>
-          <div style={{ marginTop: 24, display: 'flex', gap: 12 }}>
+          <div className="home-hero-cta-row" style={{ marginTop: 24, display: 'flex', gap: 12 }}>
             <button style={{
               padding: '14px 22px', borderRadius: 999,
               background: '#2B1F17', color: '#F6F1EA',
@@ -487,12 +651,20 @@ const HomePage = ({ onSelect }) => (
             >
               Join the beta →
             </button>
-            <button style={{
-              padding: '14px 22px', borderRadius: 999,
-              border: '1px solid rgba(43,31,23,0.2)',
-              fontSize: 14, fontWeight: 500,
-            }}>
-              Watch film
+            <button
+              onClick={() => setFilmOpen(true)}
+              style={{
+                padding: '14px 22px', borderRadius: 999,
+                border: '1px solid rgba(43,31,23,0.2)',
+                background: 'transparent',
+                color: '#2B1F17',
+                fontSize: 14, fontWeight: 500,
+                transition: 'all 0.3s',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = '#2B1F17'; e.currentTarget.style.color = '#F6F1EA'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = '#2B1F17'; }}
+            >
+              Watch film →
             </button>
           </div>
         </div>
@@ -500,30 +672,84 @@ const HomePage = ({ onSelect }) => (
     </div>
 
     {/* Section label */}
-    <div style={{
+    <div className="home-section-label" style={{
       maxWidth: 1200, margin: '0 auto', padding: '60px 40px 0',
       display: 'flex', justifyContent: 'space-between', alignItems: 'center',
     }}>
       <span className="mono" style={{ color: '#8A7668' }}>— 02 · Seven rooms</span>
-      <span className="mono" style={{ color: '#8A7668' }}>Hover to pause · Click to enter</span>
+      <span className="mono" style={{ color: '#8A7668' }}>Drag, scroll, or swipe</span>
     </div>
 
     {/* Auto-scrolling carousel */}
     <Carousel onSelect={onSelect}/>
 
     {/* Footer strip */}
-    <div style={{
+    <div className="home-footer" style={{
       maxWidth: 1200, margin: '40px auto 0', padding: '60px 40px',
       borderTop: '1px solid rgba(43,31,23,0.1)',
       display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 20,
     }}>
-      <div className="display" style={{ fontSize: 28, fontStyle: 'italic', fontWeight: 300, color: '#2B1F17', maxWidth: 500, lineHeight: 1.3 }}>
+      <div className="display home-footer-quote" style={{ fontSize: 28, fontStyle: 'italic', fontWeight: 300, color: '#2B1F17', maxWidth: 500, lineHeight: 1.3 }}>
         "Software that feels like a deep breath."
       </div>
       <span className="mono" style={{ color: '#8A7668' }}>© NookEase 2026 · Made slowly</span>
     </div>
+
+    {/* Film modal — opens when "Watch film" is clicked. Backdrop click closes it. */}
+    {filmOpen && (
+      <div
+        onClick={() => setFilmOpen(false)}
+        style={{
+          position: 'fixed', inset: 0, zIndex: 1000,
+          background: 'rgba(43, 31, 23, 0.86)',
+          backdropFilter: 'blur(8px)',
+          WebkitBackdropFilter: 'blur(8px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: 24,
+          animation: 'fade-up 0.3s ease-out',
+        }}
+      >
+        {/* stopPropagation so clicks on the video frame don't dismiss the modal */}
+        <div
+          onClick={e => e.stopPropagation()}
+          style={{
+            position: 'relative',
+            width: '100%', maxWidth: 1280,
+            aspectRatio: '16 / 9',
+            background: '#000',
+            borderRadius: 12,
+            overflow: 'hidden',
+            boxShadow: '0 60px 120px -20px rgba(0,0,0,0.6)',
+          }}
+        >
+          <video
+            src="/nookease-film.mp4"
+            autoPlay
+            controls
+            playsInline
+            style={{ width: '100%', height: '100%', display: 'block' }}
+          />
+        </div>
+
+        <button
+          onClick={() => setFilmOpen(false)}
+          aria-label="Close film"
+          className="mono"
+          style={{
+            position: 'absolute', top: 24, right: 24,
+            padding: '10px 16px', borderRadius: 999,
+            border: '1px solid rgba(246, 241, 234, 0.3)',
+            background: 'transparent', color: '#F6F1EA',
+            fontSize: 11, cursor: 'pointer',
+          }}
+        >
+          Close ✕
+        </button>
+      </div>
+    )}
   </div>
-);
+  );
+};
 
 // ============================================================
 // ---------- Interactive panel pages (Planner / Journal / Workout)
@@ -3671,6 +3897,7 @@ const Companion = ({ currentRoute, onNav }) => {
       <button
         onClick={() => setOpen(o => !o)}
         aria-label="Open Ember, your NookEase guide"
+        className="ember-launcher"
         style={{
           position: 'fixed',
           bottom: 28, right: 28,

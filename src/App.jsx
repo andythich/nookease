@@ -462,7 +462,12 @@ const Carousel = ({ onSelect }) => {
   const rafRef = useRef(null);
   const lastTickRef = useRef(0);
   const pauseUntilRef = useRef(0);
-  const dragRef = useRef({ active: false, startX: 0, startScroll: 0, moved: 0, pointerId: null });
+  // Fractional scroll accumulator. scrollLeft is rounded to integer pixels by
+  // the browser when written, so 30px/s × 1/60 ≈ 0.5px per frame would round
+  // away to 0 and the carousel would never auto-advance. We keep the real
+  // sub-pixel position here and only push it to the DOM each frame.
+  const virtualScrollRef = useRef(0);
+  const dragRef = useRef({ active: false, startX: 0, startScroll: 0, moved: 0 });
   const [hovered, setHovered] = useState(false);
 
   // Triple the panels so we can wrap-around in either direction without a visible
@@ -477,9 +482,11 @@ const Carousel = ({ onSelect }) => {
     const el = scrollerRef.current;
     if (!el) return;
 
-    // Center on the middle copy after layout has settled.
+    // Center on the middle copy after layout has settled. Sync the virtual
+    // accumulator to the actual position so they don't drift.
     const initId = requestAnimationFrame(() => {
       el.scrollLeft = el.scrollWidth / 3;
+      virtualScrollRef.current = el.scrollLeft;
     });
 
     // RAF loop: nudges scrollLeft forward when idle, snaps the wrap when the
@@ -491,13 +498,25 @@ const Carousel = ({ onSelect }) => {
 
       const isPaused = hovered || dragRef.current.active || now < pauseUntilRef.current;
       if (!isPaused && el) {
-        el.scrollLeft += SPEED_PX_PER_SEC * dt;
+        // Accumulate fractionally, then write the rounded position to the DOM.
+        virtualScrollRef.current += SPEED_PX_PER_SEC * dt;
+        el.scrollLeft = virtualScrollRef.current;
+      } else if (el) {
+        // While paused (drag, hover, or wheel-cooldown) the user/wheel is
+        // driving scrollLeft directly, so re-sync the accumulator to the
+        // browser's actual position to avoid a jump on resume.
+        virtualScrollRef.current = el.scrollLeft;
       }
 
       if (el) {
         const third = el.scrollWidth / 3;
-        if (el.scrollLeft >= third * 2) el.scrollLeft -= third;
-        else if (el.scrollLeft < third * 0.5) el.scrollLeft += third;
+        if (el.scrollLeft >= third * 2) {
+          el.scrollLeft -= third;
+          virtualScrollRef.current -= third;
+        } else if (el.scrollLeft < third * 0.5) {
+          el.scrollLeft += third;
+          virtualScrollRef.current += third;
+        }
       }
 
       rafRef.current = requestAnimationFrame(tick);
@@ -519,11 +538,17 @@ const Carousel = ({ onSelect }) => {
     if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
       e.preventDefault();
       el.scrollLeft += e.deltaY;
+      virtualScrollRef.current = el.scrollLeft;
       pauseUntilRef.current = performance.now() + 1200;
     }
   };
 
   // Pointer events handle both mouse drag and touch swipe in one code path.
+  // We deliberately do NOT call setPointerCapture — capturing the pointer on
+  // the scroller div redirects the eventual click event from the panel-card
+  // button to the scroller div itself, which means panel clicks never fire.
+  // Instead we end the drag on pointerup OR pointerleave, which covers the
+  // "user drags the cursor outside the carousel" case cleanly.
   const onPointerDown = (e) => {
     const el = scrollerRef.current;
     if (!el) return;
@@ -532,9 +557,7 @@ const Carousel = ({ onSelect }) => {
       startX: e.clientX,
       startScroll: el.scrollLeft,
       moved: 0,
-      pointerId: e.pointerId,
     };
-    el.setPointerCapture?.(e.pointerId);
   };
   const onPointerMove = (e) => {
     const d = dragRef.current;
@@ -542,19 +565,21 @@ const Carousel = ({ onSelect }) => {
     const dx = e.clientX - d.startX;
     d.moved = Math.max(d.moved, Math.abs(dx));
     const el = scrollerRef.current;
-    if (el) el.scrollLeft = d.startScroll - dx;
+    if (el) {
+      el.scrollLeft = d.startScroll - dx;
+      virtualScrollRef.current = el.scrollLeft;
+    }
   };
-  const endDrag = (e) => {
+  const endDrag = () => {
     const d = dragRef.current;
     if (!d.active) return;
     d.active = false;
     pauseUntilRef.current = performance.now() + 1200;
-    const el = scrollerRef.current;
-    if (el && d.pointerId != null) el.releasePointerCapture?.(d.pointerId);
   };
 
   // Suppress the click after a meaningful drag so dragging doesn't accidentally
-  // open a panel. 5px is the conventional threshold.
+  // open a panel. 5px is the conventional threshold. We read moved from the
+  // most recent press; pointerdown resets it to 0 on the next press.
   const handleSelect = (id) => {
     if (dragRef.current.moved > 5) return;
     onSelect(id);

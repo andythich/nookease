@@ -63,8 +63,8 @@ const PANELS = [
     description: 'Capture thoughts on small cards. Shuffle them, group them, rediscover them. A quiet way to think slowly.',
   },
   {
-    id: 'diary',
-    label: 'Diary',
+    id: 'notebook',
+    label: 'Notebook',
     number: '05',
     tagline: 'The record of your days',
     hue: '#F2633A',
@@ -439,7 +439,7 @@ if (id === 'notecards') return (
   </svg>
 );
 
-if (id === 'diary') return (
+if (id === 'notebook') return (
   <svg {...common} viewBox="0 0 220 220">
     <rect x="30" y="35" width="160" height="160" rx="6" fill="#FFFDFA" stroke="#2B1F17" strokeWidth="1.5"/>
     <rect x="30" y="35" width="160" height="28" fill={hue} opacity="0.15"/>
@@ -4443,6 +4443,693 @@ const Companion = ({ currentRoute, onNav }) => {
   );
 };
 
+// ---------- Notebook Page ----------
+// Three internal views, mirroring the Notecards pattern:
+//   'list'  — the shelf of notebooks (tile grid + "+ New notebook" tile)
+//   'open'  — a single notebook open to a dated page, with prev/next page flip
+//   'toc'   — table of contents for the active notebook (list of dated entries)
+//
+// Two Supabase tables (see schema notes at the bottom of this file):
+//   notebooks         (id, user_id, title, created_at, updated_at)
+//   notebook_entries  (id, notebook_id, user_id, entry_date, content,
+//                      created_at, updated_at)  UNIQUE(notebook_id, entry_date)
+//
+// "entry_date" is a DATE (YYYY-MM-DD) so each notebook has at most one entry
+// per day. Opening a notebook lands on today's page. If today has no row yet,
+// we show a blank page; the row gets inserted lazily on the first keystroke.
+const NotebookPage = ({ panel, onNav, user }) => {
+  // ----- helpers -----
+  const todayStr = () => {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  };
+  const formatLong = (ymd) => {
+    if (!ymd) return '';
+    // Parse as local (not UTC) to avoid the off-by-one timezone trap
+    const [y, m, d] = ymd.split('-').map(Number);
+    const dt = new Date(y, m - 1, d);
+    return dt.toLocaleDateString(undefined, {
+      weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
+    });
+  };
+  const addDays = (ymd, n) => {
+    const [y, m, d] = ymd.split('-').map(Number);
+    const dt = new Date(y, m - 1, d);
+    dt.setDate(dt.getDate() + n);
+    const yy = dt.getFullYear();
+    const mm = String(dt.getMonth() + 1).padStart(2, '0');
+    const dd = String(dt.getDate()).padStart(2, '0');
+    return `${yy}-${mm}-${dd}`;
+  };
+
+  // ----- state -----
+  const [view, setView] = useState('list');           // 'list' | 'open' | 'toc'
+  const [notebooks, setNotebooks] = useState([]);
+  const [entries, setEntries] = useState([]);          // entries for active notebook only
+  const [activeNotebookId, setActiveNotebookId] = useState(null);
+  const [activeDate, setActiveDate] = useState(todayStr());
+  const [loading, setLoading] = useState(true);
+  const [flipping, setFlipping] = useState(null);      // null | 'forward' | 'back'
+  const [editingTitle, setEditingTitle] = useState(false);
+
+  const saveTimerRef = useRef(null);
+  const flipTimerRef = useRef(null);
+  const textareaRef = useRef(null);
+
+  const activeNotebook = notebooks.find(n => n.id === activeNotebookId);
+  const activeEntry = entries.find(e => e.entry_date === activeDate);
+
+  // ----- initial fetch: load all notebooks for this user -----
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase
+        .from('notebooks')
+        .select('*')
+        .order('updated_at', { ascending: false });
+      if (cancelled) return;
+      if (error) {
+        console.error('Notebooks fetch error:', error);
+        setNotebooks([]);
+      } else {
+        setNotebooks(data || []);
+      }
+      setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [user]);
+
+  // ----- when a notebook becomes active, load its entries -----
+  useEffect(() => {
+    if (!activeNotebookId || !user) return;
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase
+        .from('notebook_entries')
+        .select('*')
+        .eq('notebook_id', activeNotebookId)
+        .order('entry_date', { ascending: false });
+      if (cancelled) return;
+      if (error) {
+        console.error('Entries fetch error:', error);
+        setEntries([]);
+      } else {
+        setEntries(data || []);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [activeNotebookId, user]);
+
+  // ----- create a new notebook -----
+  const newNotebook = async () => {
+    const { data, error } = await supabase
+      .from('notebooks')
+      .insert({ user_id: user.id, title: 'untitled notebook' })
+      .select()
+      .single();
+    if (error) { console.error('New notebook error:', error); return; }
+    setNotebooks(prev => [data, ...prev]);
+    // Open it straight away so the user can rename + start writing
+    setActiveNotebookId(data.id);
+    setEntries([]);
+    setActiveDate(todayStr());
+    setView('open');
+  };
+
+  // ----- rename the active notebook (debounced) -----
+  const renameNotebook = (title) => {
+    if (!activeNotebookId) return;
+    setNotebooks(prev => prev.map(n =>
+      n.id === activeNotebookId ? { ...n, title } : n
+    ));
+    clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(async () => {
+      const { error } = await supabase
+        .from('notebooks')
+        .update({ title, updated_at: new Date().toISOString() })
+        .eq('id', activeNotebookId);
+      if (error) console.error('Rename notebook error:', error);
+    }, 600);
+  };
+
+  // ----- delete the active notebook -----
+  const deleteNotebook = async () => {
+    if (!activeNotebookId) return;
+    if (!window.confirm('Remove this notebook and all its entries? This can\'t be undone.')) return;
+    const id = activeNotebookId;
+    const before = notebooks;
+    setNotebooks(prev => prev.filter(n => n.id !== id));
+    setActiveNotebookId(null);
+    setEntries([]);
+    setView('list');
+    // notebook_entries.notebook_id has ON DELETE CASCADE so children go with it
+    const { error } = await supabase.from('notebooks').delete().eq('id', id);
+    if (error) {
+      console.error('Delete notebook error:', error);
+      setNotebooks(before);
+    }
+  };
+
+  // ----- update / create today's entry on typing -----
+  // Optimistic local update + 600ms debounced upsert. We use upsert keyed on
+  // (notebook_id, entry_date) so the first keystroke on a fresh day creates
+  // the row and subsequent keystrokes update it.
+  const updateEntryContent = (content) => {
+    const date = activeDate;
+    const nbId = activeNotebookId;
+    if (!nbId) return;
+
+    setEntries(prev => {
+      const existing = prev.find(e => e.entry_date === date);
+      if (existing) {
+        return prev.map(e => e.entry_date === date
+          ? { ...e, content, updated_at: new Date().toISOString() }
+          : e);
+      }
+      // Optimistic placeholder; the real id will arrive after upsert
+      return [{
+        id: `tmp-${date}`,
+        notebook_id: nbId,
+        user_id: user.id,
+        entry_date: date,
+        content,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }, ...prev];
+    });
+
+    clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(async () => {
+      const { data, error } = await supabase
+        .from('notebook_entries')
+        .upsert({
+          user_id: user.id,
+          notebook_id: nbId,
+          entry_date: date,
+          content,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'notebook_id,entry_date' })
+        .select()
+        .single();
+      if (error) {
+        console.error('Entry save error:', error);
+        return;
+      }
+      // Replace any tmp- placeholder with the real row
+      setEntries(prev => prev.map(e =>
+        e.entry_date === date ? data : e
+      ));
+      // Bump notebook updated_at so the shelf sorts recent on top
+      setNotebooks(prev => prev.map(n =>
+        n.id === nbId ? { ...n, updated_at: new Date().toISOString() } : n
+      ));
+    }, 600);
+  };
+
+  // ----- page flip animation -----
+  // We don't do a true 3D backface flip — instead we tilt + fade the page out,
+  // swap the date at the midpoint, then tilt + fade back in. ~500ms total.
+  // Keyframes are defined in the inline <style> at the bottom of this component.
+  const flipTo = (newDate, direction) => {
+    if (flipping) return;            // ignore rapid double-clicks
+    // Persist any pending edit before we navigate away
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+      // Force-flush by writing whatever's currently in state
+      const cur = entries.find(e => e.entry_date === activeDate);
+      if (cur && !String(cur.id).startsWith('tmp-')) {
+        supabase.from('notebook_entries').update({
+          content: cur.content,
+          updated_at: new Date().toISOString(),
+        }).eq('id', cur.id).then(({ error }) => {
+          if (error) console.error('Flush save error:', error);
+        });
+      }
+    }
+    setFlipping(direction);
+    // At ~250ms (mid-flip, page edge-on) swap the date
+    flipTimerRef.current = setTimeout(() => {
+      setActiveDate(newDate);
+    }, 250);
+    // At 500ms clear the flipping state to release the animation
+    setTimeout(() => setFlipping(null), 500);
+  };
+  useEffect(() => () => clearTimeout(flipTimerRef.current), []);
+
+  const goPrevDay = () => flipTo(addDays(activeDate, -1), 'back');
+  const goNextDay = () => flipTo(addDays(activeDate, 1), 'forward');
+
+  // ----- entries that actually have content (for the table of contents) -----
+  const populatedEntries = entries
+    .filter(e => e.content && e.content.trim().length > 0)
+    .sort((a, b) => b.entry_date.localeCompare(a.entry_date));
+
+  // ====================================================================
+  // RENDER
+  // ====================================================================
+  return (
+    <div style={{ paddingBottom: 80 }}>
+      <PanelHeader panel={panel} onNav={onNav} subtitle="A dated companion. Open a notebook, find today's page, write what the day was." />
+
+      {loading ? <LoadingNote panel={panel}/> : (
+        <div style={{ maxWidth: 1100, margin: '0 auto', padding: '0 40px' }}>
+
+          {/* ============== LIST VIEW: shelf of notebooks ============== */}
+          {view === 'list' && (
+            <div>
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
+                gap: 20,
+              }}>
+                {/* + New notebook tile (always first) */}
+                <button
+                  onClick={newNotebook}
+                  style={{
+                    background: 'transparent',
+                    border: `1.5px dashed ${panel.hue}`,
+                    borderRadius: 10,
+                    minHeight: 200,
+                    padding: 20,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 10,
+                    color: panel.hue,
+                    transition: 'background 200ms',
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background = 'rgba(242, 99, 58, 0.06)'}
+                  onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                >
+                  <span style={{ fontSize: 28, fontWeight: 300 }}>+</span>
+                  <span className="mono" style={{ fontSize: 13 }}>new notebook</span>
+                </button>
+
+                {/* Existing notebooks */}
+                {notebooks.map(n => (
+                  <button
+                    key={n.id}
+                    onClick={() => {
+                      setActiveNotebookId(n.id);
+                      setActiveDate(todayStr());
+                      setView('open');
+                    }}
+                    style={{
+                      background: '#FFFDFA',
+                      border: '1px solid rgba(43, 31, 23, 0.12)',
+                      borderRadius: 10,
+                      minHeight: 200,
+                      padding: '24px 22px',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'flex-start',
+                      justifyContent: 'space-between',
+                      gap: 14,
+                      textAlign: 'left',
+                      transition: 'transform 200ms, box-shadow 200ms',
+                    }}
+                    onMouseEnter={e => {
+                      e.currentTarget.style.transform = 'translateY(-2px)';
+                      e.currentTarget.style.boxShadow = '0 8px 24px rgba(43, 31, 23, 0.08)';
+                    }}
+                    onMouseLeave={e => {
+                      e.currentTarget.style.transform = 'translateY(0)';
+                      e.currentTarget.style.boxShadow = 'none';
+                    }}
+                  >
+                    {/* Tiny notebook spine illustration */}
+                    <div style={{
+                      width: '100%', height: 80,
+                      background: `linear-gradient(135deg, ${panel.hue}22, ${panel.hue}11)`,
+                      borderRadius: 4,
+                      borderLeft: `4px solid ${panel.hue}`,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    }}>
+                      <span className="display" style={{
+                        fontSize: 26, fontStyle: 'italic',
+                        color: panel.hue, opacity: 0.85,
+                      }}>
+                        {(n.title || 'untitled').charAt(0).toLowerCase()}
+                      </span>
+                    </div>
+                    <div style={{ width: '100%' }}>
+                      <div className="display" style={{
+                        fontSize: 18, fontStyle: 'italic',
+                        color: '#2B1F17', marginBottom: 6,
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}>
+                        {n.title || 'untitled'}
+                      </div>
+                      <div className="mono" style={{ fontSize: 11, color: '#8A7668' }}>
+                        updated {new Date(n.updated_at).toLocaleDateString()}
+                      </div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+
+              {notebooks.length === 0 && (
+                <p style={{
+                  marginTop: 30, fontStyle: 'italic',
+                  color: '#8A7668', textAlign: 'center',
+                }}>
+                  no notebooks yet. start one above.
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* ============== OPEN VIEW: a single notebook page ============== */}
+          {view === 'open' && activeNotebook && (
+            <div>
+              {/* Top bar: back to shelf, editable title, ToC button */}
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 16,
+                marginBottom: 24, flexWrap: 'wrap',
+              }}>
+                <button
+                  onClick={() => { setView('list'); setActiveNotebookId(null); }}
+                  className="mono"
+                  style={{
+                    background: 'transparent', border: 'none', cursor: 'pointer',
+                    color: '#8A7668', padding: '6px 0',
+                  }}
+                >
+                  ← shelf
+                </button>
+                <div style={{ flex: 1, minWidth: 200 }}>
+                  {editingTitle ? (
+                    <input
+                      autoFocus
+                      value={activeNotebook.title || ''}
+                      onChange={e => renameNotebook(e.target.value)}
+                      onBlur={() => setEditingTitle(false)}
+                      onKeyDown={e => { if (e.key === 'Enter') setEditingTitle(false); }}
+                      className="display"
+                      style={{
+                        fontSize: 24, fontStyle: 'italic',
+                        background: 'transparent',
+                        border: 'none',
+                        borderBottom: `1px solid ${panel.hue}`,
+                        outline: 'none', color: '#2B1F17',
+                        width: '100%', padding: '4px 0',
+                      }}
+                    />
+                  ) : (
+                    <button
+                      onClick={() => setEditingTitle(true)}
+                      className="display"
+                      style={{
+                        background: 'transparent', border: 'none', cursor: 'text',
+                        fontSize: 24, fontStyle: 'italic',
+                        color: '#2B1F17', padding: '4px 0',
+                        textAlign: 'left',
+                      }}
+                      title="click to rename"
+                    >
+                      {activeNotebook.title || 'untitled'}
+                    </button>
+                  )}
+                </div>
+                <button
+                  onClick={() => setView('toc')}
+                  className="mono"
+                  style={{
+                    background: 'transparent',
+                    border: `1px solid ${panel.hue}55`,
+                    color: panel.hue,
+                    padding: '6px 14px', borderRadius: 999,
+                    cursor: 'pointer', fontSize: 12,
+                  }}
+                >
+                  contents
+                </button>
+                <button
+                  onClick={deleteNotebook}
+                  className="mono"
+                  style={{
+                    background: 'transparent', border: 'none', cursor: 'pointer',
+                    color: '#8A7668', fontSize: 12,
+                  }}
+                  title="delete this notebook"
+                >
+                  delete
+                </button>
+              </div>
+
+              {/* The notebook page itself */}
+              <div style={{
+                position: 'relative',
+                perspective: 1600,
+                margin: '0 auto',
+              }}>
+                <div
+                  className={
+                    'notebook-page' +
+                    (flipping === 'forward' ? ' flipping-forward' : '') +
+                    (flipping === 'back' ? ' flipping-back' : '')
+                  }
+                  style={{
+                    background: '#FFFDFA',
+                    border: '1px solid rgba(43, 31, 23, 0.15)',
+                    borderRadius: '2px 12px 12px 2px',
+                    borderLeft: `4px solid ${panel.hue}`,
+                    minHeight: 540,
+                    padding: '36px 44px 44px 56px',
+                    boxShadow: '0 12px 32px rgba(43, 31, 23, 0.08)',
+                    position: 'relative',
+                    transformOrigin: 'left center',
+                  }}
+                >
+                  {/* Date heading */}
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'baseline',
+                    justifyContent: 'space-between',
+                    marginBottom: 24,
+                    paddingBottom: 14,
+                    borderBottom: '1px dashed rgba(43, 31, 23, 0.15)',
+                  }}>
+                    <h2 className="display" style={{
+                      fontSize: 28, fontStyle: 'italic',
+                      color: '#2B1F17', fontWeight: 400,
+                    }}>
+                      {formatLong(activeDate)}
+                    </h2>
+                    {activeDate === todayStr() && (
+                      <span className="mono" style={{
+                        fontSize: 11, color: panel.hue,
+                        background: `${panel.hue}15`,
+                        padding: '3px 10px', borderRadius: 999,
+                      }}>
+                        today
+                      </span>
+                    )}
+                  </div>
+
+                  {/* The actual writing area */}
+                  <textarea
+                    ref={textareaRef}
+                    value={activeEntry?.content || ''}
+                    onChange={e => updateEntryContent(e.target.value)}
+                    placeholder="how was the day…"
+                    style={{
+                      width: '100%',
+                      minHeight: 380,
+                      background: 'transparent',
+                      border: 'none',
+                      outline: 'none',
+                      resize: 'none',
+                      fontFamily: 'Inter Tight, sans-serif',
+                      fontSize: 16,
+                      lineHeight: 1.8,
+                      color: '#2B1F17',
+                      // Faint horizontal lines, like a real notebook page
+                      backgroundImage: 'repeating-linear-gradient(to bottom, transparent 0, transparent 27.8px, rgba(43, 31, 23, 0.08) 27.8px, rgba(43, 31, 23, 0.08) 28.8px)',
+                    }}
+                  />
+                </div>
+
+                {/* Prev / next page flip controls */}
+                <div style={{
+                  display: 'flex', justifyContent: 'space-between',
+                  marginTop: 18,
+                }}>
+                  <button
+                    onClick={goPrevDay}
+                    disabled={!!flipping}
+                    className="mono"
+                    style={{
+                      background: 'transparent',
+                      border: '1px solid rgba(43, 31, 23, 0.2)',
+                      color: '#5C4A3E',
+                      padding: '10px 18px', borderRadius: 999,
+                      cursor: flipping ? 'default' : 'pointer',
+                      opacity: flipping ? 0.5 : 1,
+                      fontSize: 12,
+                    }}
+                  >
+                    ← previous day
+                  </button>
+                  <button
+                    onClick={() => flipTo(todayStr(), todayStr() > activeDate ? 'forward' : 'back')}
+                    disabled={!!flipping || activeDate === todayStr()}
+                    className="mono"
+                    style={{
+                      background: 'transparent',
+                      border: 'none',
+                      color: '#8A7668',
+                      cursor: (flipping || activeDate === todayStr()) ? 'default' : 'pointer',
+                      opacity: (flipping || activeDate === todayStr()) ? 0.4 : 1,
+                      fontSize: 12,
+                    }}
+                  >
+                    today
+                  </button>
+                  <button
+                    onClick={goNextDay}
+                    disabled={!!flipping}
+                    className="mono"
+                    style={{
+                      background: 'transparent',
+                      border: '1px solid rgba(43, 31, 23, 0.2)',
+                      color: '#5C4A3E',
+                      padding: '10px 18px', borderRadius: 999,
+                      cursor: flipping ? 'default' : 'pointer',
+                      opacity: flipping ? 0.5 : 1,
+                      fontSize: 12,
+                    }}
+                  >
+                    next day →
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ============== TOC VIEW: list of dated entries ============== */}
+          {view === 'toc' && activeNotebook && (
+            <div>
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 16,
+                marginBottom: 24,
+              }}>
+                <button
+                  onClick={() => setView('open')}
+                  className="mono"
+                  style={{
+                    background: 'transparent', border: 'none', cursor: 'pointer',
+                    color: '#8A7668', padding: '6px 0',
+                  }}
+                >
+                  ← back to page
+                </button>
+                <h2 className="display" style={{
+                  fontSize: 24, fontStyle: 'italic',
+                  color: '#2B1F17', fontWeight: 400,
+                }}>
+                  contents · {activeNotebook.title || 'untitled'}
+                </h2>
+              </div>
+
+              {populatedEntries.length === 0 ? (
+                <p style={{
+                  marginTop: 40, fontStyle: 'italic',
+                  color: '#8A7668', textAlign: 'center',
+                }}>
+                  no entries yet. write today's page first.
+                </p>
+              ) : (
+                <ul style={{ listStyle: 'none', padding: 0 }}>
+                  {populatedEntries.map(e => (
+                    <li key={e.id} style={{
+                      borderBottom: '1px solid rgba(43, 31, 23, 0.08)',
+                    }}>
+                      <button
+                        onClick={() => {
+                          // Pick a flip direction based on which way the date is moving
+                          const dir = e.entry_date < activeDate ? 'back' : 'forward';
+                          setView('open');
+                          // Defer the flip a tick so the open view mounts first
+                          setTimeout(() => flipTo(e.entry_date, dir), 20);
+                        }}
+                        style={{
+                          width: '100%', textAlign: 'left',
+                          background: 'transparent', border: 'none',
+                          padding: '18px 14px', cursor: 'pointer',
+                          display: 'flex', flexDirection: 'column', gap: 6,
+                          transition: 'background 150ms',
+                        }}
+                        onMouseEnter={ev => ev.currentTarget.style.background = 'rgba(242, 99, 58, 0.04)'}
+                        onMouseLeave={ev => ev.currentTarget.style.background = 'transparent'}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                          <span className="display" style={{
+                            fontSize: 17, fontStyle: 'italic', color: '#2B1F17',
+                          }}>
+                            {formatLong(e.entry_date)}
+                          </span>
+                          <span className="mono" style={{ fontSize: 11, color: '#8A7668' }}>
+                            {(e.content || '').length} chars
+                          </span>
+                        </div>
+                        <p style={{
+                          fontSize: 14, color: '#5C4A3E',
+                          lineHeight: 1.5,
+                          // Show first ~140 chars as a preview
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          display: '-webkit-box',
+                          WebkitLineClamp: 2,
+                          WebkitBoxOrient: 'vertical',
+                        }}>
+                          {(e.content || '').slice(0, 200)}
+                          {(e.content || '').length > 200 ? '…' : ''}
+                        </p>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Page-flip animation keyframes (scoped to this page) */}
+      <style>{`
+        .notebook-page {
+          transition: none;
+        }
+        .notebook-page.flipping-forward {
+          animation: notebook-flip-fwd 500ms ease-in-out;
+        }
+        .notebook-page.flipping-back {
+          animation: notebook-flip-back 500ms ease-in-out;
+        }
+        @keyframes notebook-flip-fwd {
+          0%   { transform: rotateY(0deg);    opacity: 1; }
+          50%  { transform: rotateY(-90deg);  opacity: 0; }
+          100% { transform: rotateY(0deg);    opacity: 1; }
+        }
+        @keyframes notebook-flip-back {
+          0%   { transform: rotateY(0deg);    opacity: 1; }
+          50%  { transform: rotateY(90deg);   opacity: 0; }
+          100% { transform: rotateY(0deg);    opacity: 1; }
+        }
+      `}</style>
+    </div>
+  );
+};
+
 // ---------- Root App ----------
 export default function App() {
   const [route, setRoute] = useState('home');
@@ -4463,9 +5150,9 @@ export default function App() {
     }
   }, [user, route]);
 
-  // Three interactive panels require an account. If a logged-out visitor
+  // Four interactive panels require an account. If a logged-out visitor
   // clicks one of those panels in the carousel, send them to login.
-  const protectedRoutes = ['planner', 'journal', 'workout', 'notecards'];
+  const protectedRoutes = ['planner', 'journal', 'workout', 'notecards', 'notebook'];
   useEffect(() => {
     if (!loading && !user && protectedRoutes.includes(route)) {
       setRoute('login');
@@ -4498,14 +5185,14 @@ export default function App() {
       {(() => {
         if (route === 'home') return <HomePage onSelect={navigate}/>;
         if (route === 'login') return <LoginPage onNav={navigate}/>;
-        // The three interactive panels get their own dedicated pages.
-        // Notecards and diary still show the marketing teaser for now.
+        // The five interactive panels get their own dedicated pages.
         const panel = PANELS.find(p => p.id === route);
         if (!panel) return <HomePage onSelect={navigate}/>;
         if (route === 'planner') return <PlannerPage panel={panel} onNav={navigate} user={user}/>;
         if (route === 'journal') return <JournalPage panel={panel} onNav={navigate} user={user}/>;
         if (route === 'workout') return <WorkoutPage panel={panel} onNav={navigate} user={user}/>;
         if (route === 'notecards') return <NotecardsPage panel={panel} onNav={navigate} user={user}/>;
+        if (route === 'notebook') return <NotebookPage panel={panel} onNav={navigate} user={user}/>;
         return <FeaturePage panelId={route} onNav={navigate}/>;
       })()}
       <Companion currentRoute={route} onNav={navigate}/>

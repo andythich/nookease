@@ -503,6 +503,17 @@ const Carousel = ({ onSelect }) => {
     window.addEventListener('pointerup', onWindowPointerUp);
     window.addEventListener('pointercancel', onWindowPointerUp);
 
+    // Hover-stuck safety net. mouseleave/pointerleave can fail to fire if the
+    // page loses focus, the cursor exits via a region where the OS swallows
+    // the event, or the user alt-tabs while hovered. We've seen this in the
+    // wild: hoveredRef gets stuck `true` and the rAF loop pauses forever.
+    // Clear hovered state on window blur and on document-level pointerleave
+    // (which fires when the cursor leaves the entire viewport).
+    const onWindowBlur = () => { hoveredRef.current = false; };
+    const onDocPointerLeave = () => { hoveredRef.current = false; };
+    window.addEventListener('blur', onWindowBlur);
+    document.addEventListener('pointerleave', onDocPointerLeave);
+
     // RAF loop: nudges scrollLeft forward when idle, snaps the wrap when the
     // user (or the loop itself) crosses an edge copy.
     const tick = (now) => {
@@ -532,6 +543,8 @@ const Carousel = ({ onSelect }) => {
       cancelAnimationFrame(rafRef.current);
       window.removeEventListener('pointerup', onWindowPointerUp);
       window.removeEventListener('pointercancel', onWindowPointerUp);
+      window.removeEventListener('blur', onWindowBlur);
+      document.removeEventListener('pointerleave', onDocPointerLeave);
     };
   }, []);  // run once on mount, never tear down on hover changes
 
@@ -593,8 +606,8 @@ const Carousel = ({ onSelect }) => {
 
   return (
     <div
-      onMouseEnter={() => { hoveredRef.current = true; }}
-      onMouseLeave={() => { hoveredRef.current = false; }}
+      onPointerEnter={() => { hoveredRef.current = true; }}
+      onPointerLeave={() => { hoveredRef.current = false; }}
       style={{
         position: 'relative',
         width: '100%',

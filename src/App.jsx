@@ -482,6 +482,22 @@ const Carousel = ({ onSelect }) => {
       el.scrollLeft = el.scrollWidth / 3;
     });
 
+    // Belt-and-suspenders: a window-level pointerup that always clears drag
+    // state. If pointer capture fails or the user releases outside the
+    // viewport, the element-level pointerup may never fire — leaving
+    // dragRef.current.active stuck at true, which freezes auto-scroll
+    // forever (because the rAF loop treats active=true as "user is dragging,
+    // pause"). This guarantees drag state always clears.
+    const onWindowPointerUp = () => {
+      if (dragRef.current.active) {
+        dragRef.current.active = false;
+        pauseUntilRef.current = performance.now() + 1200;
+        setTimeout(() => { dragRef.current.moved = 0; }, 0);
+      }
+    };
+    window.addEventListener('pointerup', onWindowPointerUp);
+    window.addEventListener('pointercancel', onWindowPointerUp);
+
     // RAF loop: nudges scrollLeft forward when idle, snaps the wrap when the
     // user (or the loop itself) crosses an edge copy.
     const tick = (now) => {
@@ -507,6 +523,8 @@ const Carousel = ({ onSelect }) => {
     return () => {
       cancelAnimationFrame(initId);
       cancelAnimationFrame(rafRef.current);
+      window.removeEventListener('pointerup', onWindowPointerUp);
+      window.removeEventListener('pointercancel', onWindowPointerUp);
     };
   }, [hovered]);
 
@@ -551,6 +569,12 @@ const Carousel = ({ onSelect }) => {
     pauseUntilRef.current = performance.now() + 1200;
     const el = scrollerRef.current;
     if (el && d.pointerId != null) el.releasePointerCapture?.(d.pointerId);
+    // Defer the click-suppression reset so the click event (which fires AFTER
+    // pointerup) still sees the correct `moved` value. Without this defer,
+    // we'd reset to 0 before handleSelect runs and every drag would open a
+    // panel. Without the reset at all, `moved` from one drag leaks into the
+    // next interaction and silently kills clicks forever.
+    setTimeout(() => { dragRef.current.moved = 0; }, 0);
   };
 
   // Suppress the click after a meaningful drag so dragging doesn't accidentally

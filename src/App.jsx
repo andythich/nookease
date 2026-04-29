@@ -462,13 +462,13 @@ const Carousel = ({ onSelect }) => {
   const rafRef = useRef(null);
   const lastTickRef = useRef(0);
   const pauseUntilRef = useRef(0);
-  const dragRef = useRef({ active: false, startX: 0, startScroll: 0, moved: 0, pointerId: null });
-  // hovered lives in a ref, not state, so changing it doesn't tear down the
-  // rAF loop. (Earlier version used useState + [hovered] as the effect dep,
-  // which caused the auto-scroll loop to unmount/remount on every mouseenter
-  // and mouseleave — and on top of that, lastTickRef carried over from the
-  // previous mount so the first frame after remount could jump huge dt's.)
-  const hoveredRef = useRef(false);
+  // Fractional scroll accumulator. scrollLeft is rounded to integer pixels by
+  // the browser when written, so 30px/s × 1/60 ≈ 0.5px per frame would round
+  // away to 0 and the carousel would never auto-advance. We keep the real
+  // sub-pixel position here and only push it to the DOM each frame.
+  const virtualScrollRef = useRef(0);
+  const dragRef = useRef({ active: false, startX: 0, startScroll: 0, moved: 0 });
+  const [hovered, setHovered] = useState(false);
 
   // Triple the panels so we can wrap-around in either direction without a visible
   // jump. We center on the middle copy and snap back when the user crosses an edge.
@@ -482,56 +482,41 @@ const Carousel = ({ onSelect }) => {
     const el = scrollerRef.current;
     if (!el) return;
 
-    // Center on the middle copy after layout has settled.
+    // Center on the middle copy after layout has settled. Sync the virtual
+    // accumulator to the actual position so they don't drift.
     const initId = requestAnimationFrame(() => {
       el.scrollLeft = el.scrollWidth / 3;
+      virtualScrollRef.current = el.scrollLeft;
     });
-
-    // Belt-and-suspenders: a window-level pointerup that always clears drag
-    // state. If pointer capture fails or the user releases outside the
-    // viewport, the element-level pointerup may never fire — leaving
-    // dragRef.current.active stuck at true, which freezes auto-scroll
-    // forever (because the rAF loop treats active=true as "user is dragging,
-    // pause"). This guarantees drag state always clears.
-    const onWindowPointerUp = () => {
-      if (dragRef.current.active) {
-        dragRef.current.active = false;
-        pauseUntilRef.current = performance.now() + 1200;
-        setTimeout(() => { dragRef.current.moved = 0; }, 0);
-      }
-    };
-    window.addEventListener('pointerup', onWindowPointerUp);
-    window.addEventListener('pointercancel', onWindowPointerUp);
-
-    // Hover-stuck safety net. mouseleave/pointerleave can fail to fire if the
-    // page loses focus, the cursor exits via a region where the OS swallows
-    // the event, or the user alt-tabs while hovered. We've seen this in the
-    // wild: hoveredRef gets stuck `true` and the rAF loop pauses forever.
-    // Clear hovered state on window blur and on document-level pointerleave
-    // (which fires when the cursor leaves the entire viewport).
-    const onWindowBlur = () => { hoveredRef.current = false; };
-    const onDocPointerLeave = () => { hoveredRef.current = false; };
-    window.addEventListener('blur', onWindowBlur);
-    document.addEventListener('pointerleave', onDocPointerLeave);
 
     // RAF loop: nudges scrollLeft forward when idle, snaps the wrap when the
     // user (or the loop itself) crosses an edge copy.
     const tick = (now) => {
       const last = lastTickRef.current || now;
-      // Clamp dt so a backgrounded tab doesn't snap the carousel forward
-      // by huge amounts when it returns to the foreground.
-      const dt = Math.min((now - last) / 1000, 0.05);
+      const dt = (now - last) / 1000;
       lastTickRef.current = now;
 
-      const isPaused = hoveredRef.current || dragRef.current.active || now < pauseUntilRef.current;
+      const isPaused = hovered || dragRef.current.active || now < pauseUntilRef.current;
       if (!isPaused && el) {
-        el.scrollLeft += SPEED_PX_PER_SEC * dt;
+        // Accumulate fractionally, then write the rounded position to the DOM.
+        virtualScrollRef.current += SPEED_PX_PER_SEC * dt;
+        el.scrollLeft = virtualScrollRef.current;
+      } else if (el) {
+        // While paused (drag, hover, or wheel-cooldown) the user/wheel is
+        // driving scrollLeft directly, so re-sync the accumulator to the
+        // browser's actual position to avoid a jump on resume.
+        virtualScrollRef.current = el.scrollLeft;
       }
 
       if (el) {
         const third = el.scrollWidth / 3;
-        if (el.scrollLeft >= third * 2) el.scrollLeft -= third;
-        else if (el.scrollLeft < third * 0.5) el.scrollLeft += third;
+        if (el.scrollLeft >= third * 2) {
+          el.scrollLeft -= third;
+          virtualScrollRef.current -= third;
+        } else if (el.scrollLeft < third * 0.5) {
+          el.scrollLeft += third;
+          virtualScrollRef.current += third;
+        }
       }
 
       rafRef.current = requestAnimationFrame(tick);
@@ -541,12 +526,8 @@ const Carousel = ({ onSelect }) => {
     return () => {
       cancelAnimationFrame(initId);
       cancelAnimationFrame(rafRef.current);
-      window.removeEventListener('pointerup', onWindowPointerUp);
-      window.removeEventListener('pointercancel', onWindowPointerUp);
-      window.removeEventListener('blur', onWindowBlur);
-      document.removeEventListener('pointerleave', onDocPointerLeave);
     };
-  }, []);  // run once on mount, never tear down on hover changes
+  }, [hovered]);
 
   // Mouse wheel: vertical wheel scroll → horizontal carousel scroll. We only
   // hijack when the wheel's dominant axis is vertical so trackpad horizontal
@@ -557,11 +538,17 @@ const Carousel = ({ onSelect }) => {
     if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
       e.preventDefault();
       el.scrollLeft += e.deltaY;
+      virtualScrollRef.current = el.scrollLeft;
       pauseUntilRef.current = performance.now() + 1200;
     }
   };
 
   // Pointer events handle both mouse drag and touch swipe in one code path.
+  // We deliberately do NOT call setPointerCapture — capturing the pointer on
+  // the scroller div redirects the eventual click event from the panel-card
+  // button to the scroller div itself, which means panel clicks never fire.
+  // Instead we end the drag on pointerup OR pointerleave, which covers the
+  // "user drags the cursor outside the carousel" case cleanly.
   const onPointerDown = (e) => {
     const el = scrollerRef.current;
     if (!el) return;
@@ -570,9 +557,7 @@ const Carousel = ({ onSelect }) => {
       startX: e.clientX,
       startScroll: el.scrollLeft,
       moved: 0,
-      pointerId: e.pointerId,
     };
-    el.setPointerCapture?.(e.pointerId);
   };
   const onPointerMove = (e) => {
     const d = dragRef.current;
@@ -580,25 +565,21 @@ const Carousel = ({ onSelect }) => {
     const dx = e.clientX - d.startX;
     d.moved = Math.max(d.moved, Math.abs(dx));
     const el = scrollerRef.current;
-    if (el) el.scrollLeft = d.startScroll - dx;
+    if (el) {
+      el.scrollLeft = d.startScroll - dx;
+      virtualScrollRef.current = el.scrollLeft;
+    }
   };
-  const endDrag = (e) => {
+  const endDrag = () => {
     const d = dragRef.current;
     if (!d.active) return;
     d.active = false;
     pauseUntilRef.current = performance.now() + 1200;
-    const el = scrollerRef.current;
-    if (el && d.pointerId != null) el.releasePointerCapture?.(d.pointerId);
-    // Defer the click-suppression reset so the click event (which fires AFTER
-    // pointerup) still sees the correct `moved` value. Without this defer,
-    // we'd reset to 0 before handleSelect runs and every drag would open a
-    // panel. Without the reset at all, `moved` from one drag leaks into the
-    // next interaction and silently kills clicks forever.
-    setTimeout(() => { dragRef.current.moved = 0; }, 0);
   };
 
   // Suppress the click after a meaningful drag so dragging doesn't accidentally
-  // open a panel. 5px is the conventional threshold.
+  // open a panel. 5px is the conventional threshold. We read moved from the
+  // most recent press; pointerdown resets it to 0 on the next press.
   const handleSelect = (id) => {
     if (dragRef.current.moved > 5) return;
     onSelect(id);
@@ -606,8 +587,8 @@ const Carousel = ({ onSelect }) => {
 
   return (
     <div
-      onPointerEnter={() => { hoveredRef.current = true; }}
-      onPointerLeave={() => { hoveredRef.current = false; }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
       style={{
         position: 'relative',
         width: '100%',
@@ -623,6 +604,7 @@ const Carousel = ({ onSelect }) => {
         onPointerMove={onPointerMove}
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
+        onPointerLeave={endDrag}
         className="carousel-scroller"
         style={{
           display: 'flex',

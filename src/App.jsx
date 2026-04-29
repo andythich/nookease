@@ -463,7 +463,12 @@ const Carousel = ({ onSelect }) => {
   const lastTickRef = useRef(0);
   const pauseUntilRef = useRef(0);
   const dragRef = useRef({ active: false, startX: 0, startScroll: 0, moved: 0, pointerId: null });
-  const [hovered, setHovered] = useState(false);
+  // hovered lives in a ref, not state, so changing it doesn't tear down the
+  // rAF loop. (Earlier version used useState + [hovered] as the effect dep,
+  // which caused the auto-scroll loop to unmount/remount on every mouseenter
+  // and mouseleave — and on top of that, lastTickRef carried over from the
+  // previous mount so the first frame after remount could jump huge dt's.)
+  const hoveredRef = useRef(false);
 
   // Triple the panels so we can wrap-around in either direction without a visible
   // jump. We center on the middle copy and snap back when the user crosses an edge.
@@ -502,10 +507,12 @@ const Carousel = ({ onSelect }) => {
     // user (or the loop itself) crosses an edge copy.
     const tick = (now) => {
       const last = lastTickRef.current || now;
-      const dt = (now - last) / 1000;
+      // Clamp dt so a backgrounded tab doesn't snap the carousel forward
+      // by huge amounts when it returns to the foreground.
+      const dt = Math.min((now - last) / 1000, 0.05);
       lastTickRef.current = now;
 
-      const isPaused = hovered || dragRef.current.active || now < pauseUntilRef.current;
+      const isPaused = hoveredRef.current || dragRef.current.active || now < pauseUntilRef.current;
       if (!isPaused && el) {
         el.scrollLeft += SPEED_PX_PER_SEC * dt;
       }
@@ -526,7 +533,7 @@ const Carousel = ({ onSelect }) => {
       window.removeEventListener('pointerup', onWindowPointerUp);
       window.removeEventListener('pointercancel', onWindowPointerUp);
     };
-  }, [hovered]);
+  }, []);  // run once on mount, never tear down on hover changes
 
   // Mouse wheel: vertical wheel scroll → horizontal carousel scroll. We only
   // hijack when the wheel's dominant axis is vertical so trackpad horizontal
@@ -586,8 +593,8 @@ const Carousel = ({ onSelect }) => {
 
   return (
     <div
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
+      onMouseEnter={() => { hoveredRef.current = true; }}
+      onMouseLeave={() => { hoveredRef.current = false; }}
       style={{
         position: 'relative',
         width: '100%',
@@ -603,7 +610,6 @@ const Carousel = ({ onSelect }) => {
         onPointerMove={onPointerMove}
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
-        onPointerLeave={endDrag}
         className="carousel-scroller"
         style={{
           display: 'flex',

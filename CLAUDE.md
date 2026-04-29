@@ -50,13 +50,13 @@ nookease/
 │   └── favicon.svg         ← NookEase house mark (orange dot inside dark brown house)
 └── src/
     ├── main.jsx            ← React entry, mounts App
-    ├── App.jsx             ← THE WHOLE APP, ~3,985 lines
+    ├── App.jsx             ← THE WHOLE APP, ~4,200 lines
     ├── supabase.js         ← shared Supabase client (uses VITE_SUPABASE_* env vars)
     ├── index.css           ← emptied/minimal (Vite default removed)
     └── assets/
 ```
 
-**Important:** App.jsx is currently a single ~3,985-line monolith. User has been told this should eventually be split into separate component files but hasn't done so yet. Don't propose splitting unless asked.
+**Important:** App.jsx is currently a single ~4,200-line monolith. User has been told this should eventually be split into separate component files but hasn't done so yet. Don't propose splitting unless asked.
 
 ## Important file landmarks in App.jsx
 
@@ -68,7 +68,8 @@ Line numbers drift with edits — use them as a "look around here" hint, not exa
 - **Grain layer styles** — `.grain` parent gets `position: relative; z-index: 0` to create a stacking context, `.grain::before` is at `z-index: -1` so it sits below ALL content
 - **Nav** — receives `user` prop, conditionally shows "Log in / Get Early Access" (logged out) vs "hi, [name] / Sign out" (logged in)
 - **PanelIllustration** — switch on `id` returning custom SVG per panel
-- **Carousel** — container with `scroll-x` keyframe animation
+- **HomePage** — stateful component (holds `filmOpen` for the Watch film modal). The modal is `<video src="/nookease-film.mp4" autoPlay controls playsInline>` inside a fixed dark backdrop. Backdrop click closes; the inner video container uses `e.stopPropagation()` so clicks on the video don't dismiss. `playsInline` is required for iOS Safari (otherwise it auto-fullscreens on play). The video file must exist at `public/nookease-film.mp4` — if it 404s, the modal opens but shows a black box.
+- **Carousel** — JS-driven horizontal scroller with mouse wheel, click+drag, and touch swipe support. Uses Pointer Events (one code path for mouse + touch). Panels are tripled (`[...PANELS, ...PANELS, ...PANELS]`) and the scroller is centered on the middle copy; a `requestAnimationFrame` loop nudges `scrollLeft` forward at ~30px/s and snaps the position back by `scrollWidth/3` when the user crosses an edge copy, giving seamless wrap-around in either direction. Auto-advance pauses while hovered/dragging and for ~1.2s after a wheel or drag ends. A 5px movement threshold on pointerup suppresses the click so dragging doesn't open a panel. `touch-action: pan-y` on the scroller lets vertical page scroll work on mobile while horizontal swipes drive the carousel.
 - **LoadingNote and PanelHeader** — shared by interactive panels
 - **PlannerPage** — fetches/inserts/deletes against `planner_events` table
 - **JournalPage** — fetches/inserts/updates/deletes against `journal_pages` table; uses `contentEditable` + `document.execCommand` for rich text (no editor library); 600ms debounced saves
@@ -79,6 +80,42 @@ Line numbers drift with edits — use them as a "look around here" hint, not exa
 - **FeaturePage** — marketing teaser for Diary (no auth required)
 - **LoginPage** — Supabase email/password + Google OAuth + forgot password
 - **Companion (Ember):** scripted, choice-based. Each "node" has text and 2–4 option buttons. Not AI-backed.
+
+## Mobile responsiveness
+
+The site is otherwise styled inline, but a handful of components have `className` hooks specifically for a `@media (max-width: 768px)` block in `GlobalStyles`. Without these, things crashed into each other on phones. **If you remove a className thinking it's unused, you'll silently break mobile layout.** The classes and what they do:
+
+| Class                  | On                              | Mobile behavior                                       |
+| ---------------------- | ------------------------------- | ----------------------------------------------------- |
+| `site-nav`             | `<nav>` element                 | Tighter padding (16/20 instead of 24/40)              |
+| `nav-actions`          | The right-side action group     | Smaller gap                                           |
+| `nav-index`            | The "Index" / "1 / 5" pill      | `display: none` (saves horizontal space)              |
+| `nav-cta-secondary`    | All outlined nav buttons        | Smaller padding + font                                |
+| `nav-greeting`         | "hi, [name]" span               | `display: none`                                       |
+| `home-hero`            | Hero outer wrapper              | Tighter padding                                       |
+| `home-hero-row`        | Hero flex row                   | Smaller gap                                           |
+| `home-hero-copy`       | Right-column copy block         | Full-width, no bottom padding                         |
+| `home-hero-cta-row`    | Hero buttons row                | `flex-wrap: wrap`, buttons stretch                    |
+| `home-section-label`   | "— 02 · Seven rooms" row        | Stacks vertically                                     |
+| `home-footer`          | Bottom strip                    | Stacks vertically                                     |
+| `home-footer-quote`    | The quote text                  | Smaller font                                          |
+| `ember-launcher`       | Floating Ember button           | Shrinks to 52×52 and tucks closer to corner           |
+| `carousel-scroller`    | The carousel scroll container   | Hides the scrollbar (`::-webkit-scrollbar`)           |
+
+These classes are applied in addition to inline styles, so adding more inline styles doesn't break the responsive overrides — but removing the className severs the hook.
+
+## Watch film modal + nookease-film
+
+The "Watch film" button on the home page hero opens a modal that plays `public/nookease-film.mp4`. The MP4 itself was generated by a separate HyperFrames project (lives outside this repo, in `~/Downloads/nookease-film/` or wherever the user kept it). To re-render or tweak the film:
+
+```
+cd nookease-film
+npx hyperframes preview     # opens studio at localhost:3002 for scrubbing/editing
+npx hyperframes render -o nookease-film.mp4
+```
+
+Requires Node 22+ and FFmpeg installed and on PATH. The rendered MP4 then gets copied into NookEase's `public/nookease-film.mp4` (overwriting the previous one). It's an editorial 25s teaser at 1920×1080, brand-matched to NookEase (Fraunces + Inter Tight, beige + burnt orange, quiet voice).
+
 
 ## Supabase setup (already done)
 
@@ -122,11 +159,14 @@ Each table has a single RLS policy: `auth.uid() = user_id` for both `using` and 
 - Auto-deploy on push to main (~30s)
 - Local dev: `cd nookease && npm run dev` → http://localhost:5173
 - Carousel, panel click, login page (email + Google), Ember chat all functional
+- Carousel supports mouse wheel, click+drag, and touch swipe in addition to auto-advance
 - Sign up / log in / sign out / forgot password
 - Planner, Journal, Workout, Notecards all read/write from Supabase per user
 - Logged-out users hitting interactive panels get bounced to login
 - Grain texture sits below all interactive UI
 - Notecards CSV import (file picker → preview modal → bulk insert via single Supabase call)
+- Mobile-responsive layout (≤768px breakpoint) — nav tightens, hero CTAs wrap, footer/section labels stack
+- "Watch film" button on home hero opens a modal that plays `public/nookease-film.mp4`
 
 ## Notecards feature details
 
@@ -217,6 +257,24 @@ These all bit us at some point. If something is failing now, check these first:
 
 13. **Set tags can disappear if user types weirdly** — the tag input strips everything that isn't `[a-z0-9-]`. So uppercase becomes lowercase, but punctuation/spaces just get stripped silently. Worth flagging if a user is confused why their tag isn't being saved.
 
+### Carousel (the JS-driven one)
+
+14. **Why panels are tripled, not doubled** — when only auto-advancing forward, doubling is enough (you only ever need a buffer to the right). But the new carousel lets the user drag/wheel *backward* too, so a buffer copy to the left is also needed. With three copies and the scroller centered on the middle one, there's always a full panel-set's worth of room in either direction before the wrap snap kicks in. **Don't change this back to doubling — backward dragging will hit a hard edge.**
+
+15. **`touch-action: pan-y` is load-bearing on mobile** — without it, the moment a user touches the carousel, the browser locks them into either page-scroll or carousel-scroll for the duration of that touch (whichever direction won the first few pixels of movement). With `pan-y`, vertical drags scroll the page and horizontal drags scroll the carousel, which is what users expect.
+
+16. **The 5px click-suppression threshold matters** — without it, every drag would open whichever panel happened to be under the pointer when released. `handleSelect` bails if `dragRef.current.moved > 5`. If panel clicks stop working entirely, suspect this — either the threshold is misset, or `moved` isn't being reset to 0 on pointerdown (then every click after a drag silently fails).
+
+17. **`onWheel` only hijacks vertical wheel motion** — guarded by `Math.abs(e.deltaY) > Math.abs(e.deltaX)`. This lets trackpad horizontal-swipe fall through to the browser's default behavior. If wheel scrolling on the carousel ever stops working on a mouse, check that this condition is still inverted correctly (it should be `deltaY > deltaX`, not the other way around).
+
+### Modal / video
+
+18. **`playsInline` on the Watch film modal video is required** — without it, iOS Safari will try to take the video fullscreen the instant it autoplays, which breaks the modal experience. Don't remove this attribute.
+
+19. **`e.stopPropagation()` on the modal's inner div** — clicks on the video element bubble up. Without `stopPropagation`, every click on the video controls (play/pause, seek bar) closes the modal. Don't remove the wrapper div or its handler.
+
+20. **The video file is not in the repo** — `public/nookease-film.mp4` exists in production and locally but is NOT the kind of thing to regenerate on a whim. Re-rendering means going to the separate HyperFrames project, running `npx hyperframes render`, and copying the new MP4 in. (See "Watch film modal + nookease-film" section above.) If git starts complaining about file size on push, the MP4 grew — either trim the film or move it to external hosting (Cloudflare R2, S3, Vercel Blob) and update the `<video src>`.
+
 ## How to make changes
 
 User's workflow: edit App.jsx locally → `git add . && git commit -m "..." && git push` → Vercel auto-redeploys in ~30 seconds. They run on Windows (cmd, not bash).
@@ -258,4 +316,6 @@ Privacy copy says **"Yours, encrypted"** — "Your data lives in your account, e
 - Don't add a rich text editor library (Tiptap, Slate, etc.) — the journal uses contentEditable + execCommand intentionally
 - Don't add a CSV parsing library (Papa Parse, etc.) — the Notecards importer hand-rolls a parser that handles quoted fields, escaped quotes, and blank rows in ~25 lines
 - Don't revert any of the z-index trickery on `.grain` (see gotcha #9)
+- Don't revert the Carousel to a CSS-keyframe animation — interactivity (wheel/drag/swipe) and wrap-around require imperative scroll control. The old `@keyframes scroll-x` rule is gone; if you need to slow the auto-advance, change `SPEED_PX_PER_SEC` in the Carousel component.
+- Don't remove the mobile-responsive className hooks (`site-nav`, `home-hero`, etc.) — they look unused next to inline styles but they wire up the `@media (max-width: 768px)` block in GlobalStyles. See "Mobile responsiveness" section.
 - Don't store sensitive data anywhere except Supabase, and don't add new tables without RLS policies

@@ -19,7 +19,7 @@ The homepage has an auto-scrolling carousel of feature panels. There are five:
 
 1. **Planner** — "Order from the everyday" — INTERACTIVE (weekly grid)
 2. **Journal** — "A page that listens" — INTERACTIVE (iPhone-Notes-style with rich text)
-3. **Workout log** — "Small motions, stacked" — INTERACTIVE (cardio logger + chart)
+3. **Workout log** — "Small motions, stacked" — INTERACTIVE (cardio logger + chart, weight logger + chart)
 4. **Notecards** — "Ideas, one at a time" — INTERACTIVE (Quizlet-style, with CSV import)
 5. **Diary** — "The record of your days" — still marketing teaser
 
@@ -73,7 +73,7 @@ Line numbers drift with edits — use them as a "look around here" hint, not exa
 - **LoadingNote and PanelHeader** — shared by interactive panels
 - **PlannerPage** — fetches/inserts/deletes against `planner_events` table
 - **JournalPage** — fetches/inserts/updates/deletes against `journal_pages` table; uses `contentEditable` + `document.execCommand` for rich text (no editor library); 600ms debounced saves
-- **WorkoutPage** — fetches/inserts/deletes against `workout_sessions` table; hand-rolled inline SVG chart (no Recharts)
+- **WorkoutPage** — fetches/inserts/deletes against `workout_sessions` and `weight_logs` tables; hand-rolled inline SVG charts (no Recharts) for both cardio metrics and weight
 - **NotecardsPage** — three internal views (`list` | `detail` | `study`); fetches/inserts/updates/deletes against `notecard_sets` and `notecards` tables; supports CSV import
 - **NotecardsList / NotecardsDetail / NotecardsStudy** — sub-components for each view
 - **TagPill / CardRow** — small reusable sub-components for Notecards
@@ -125,6 +125,7 @@ Requires Node 22+ and FFmpeg installed and on PATH. The rendered MP4 then gets c
 planner_events    (id, user_id, day, start_time, end_time, title, created_at)
 journal_pages     (id, user_id, title, html, updated_at, created_at)
 workout_sessions  (id, user_id, date, calories, miles, minutes, created_at)
+weight_logs       (id, user_id, date, weight, created_at)
 notecard_sets     (id, user_id, title, description, tags[], created_at, updated_at)
 notecards         (id, set_id, user_id, front, back, position, created_at)
 ```
@@ -257,23 +258,33 @@ These all bit us at some point. If something is failing now, check these first:
 
 13. **Set tags can disappear if user types weirdly** — the tag input strips everything that isn't `[a-z0-9-]`. So uppercase becomes lowercase, but punctuation/spaces just get stripped silently. Worth flagging if a user is confused why their tag isn't being saved.
 
+14. **Multi-line card content (e.g. multiple-choice options)** — the card-face `<p>` in the Study view uses `whiteSpace: 'pre-line'` so newline characters in imported CSV cells render as actual line breaks. It's also `textAlign: 'left'` and uses a smaller `clamp(20px, 2.6vw, 30px)` font (instead of the original 28–42px) so a question with four A/B/C/D options on separate lines fits on one card without overflow. The CSV importer already preserves newlines inside quoted cells; the rendering CSS is the part that makes them visible. **Don't revert these to centered / 42px / `white-space: normal`** without considering MC-style cards — they'll collapse back into a single paragraph.
+
 ### Carousel (the JS-driven one)
 
-14. **Why panels are tripled, not doubled** — when only auto-advancing forward, doubling is enough (you only ever need a buffer to the right). But the new carousel lets the user drag/wheel *backward* too, so a buffer copy to the left is also needed. With three copies and the scroller centered on the middle one, there's always a full panel-set's worth of room in either direction before the wrap snap kicks in. **Don't change this back to doubling — backward dragging will hit a hard edge.**
+15. **Why panels are tripled, not doubled** — when only auto-advancing forward, doubling is enough (you only ever need a buffer to the right). But the new carousel lets the user drag/wheel *backward* too, so a buffer copy to the left is also needed. With three copies and the scroller centered on the middle one, there's always a full panel-set's worth of room in either direction before the wrap snap kicks in. **Don't change this back to doubling — backward dragging will hit a hard edge.**
 
-15. **`touch-action: pan-y` is load-bearing on mobile** — without it, the moment a user touches the carousel, the browser locks them into either page-scroll or carousel-scroll for the duration of that touch (whichever direction won the first few pixels of movement). With `pan-y`, vertical drags scroll the page and horizontal drags scroll the carousel, which is what users expect.
+16. **`touch-action: pan-y` is load-bearing on mobile** — without it, the moment a user touches the carousel, the browser locks them into either page-scroll or carousel-scroll for the duration of that touch (whichever direction won the first few pixels of movement). With `pan-y`, vertical drags scroll the page and horizontal drags scroll the carousel, which is what users expect.
 
-16. **The 5px click-suppression threshold matters** — without it, every drag would open whichever panel happened to be under the pointer when released. `handleSelect` bails if `dragRef.current.moved > 5`. If panel clicks stop working entirely, suspect this — either the threshold is misset, or `moved` isn't being reset to 0 on pointerdown (then every click after a drag silently fails).
+17. **The 5px click-suppression threshold matters** — without it, every drag would open whichever panel happened to be under the pointer when released. `handleSelect` bails if `dragRef.current.moved > 5`. If panel clicks stop working entirely, suspect this — either the threshold is misset, or `moved` isn't being reset to 0 on pointerdown (then every click after a drag silently fails).
 
-17. **`onWheel` only hijacks vertical wheel motion** — guarded by `Math.abs(e.deltaY) > Math.abs(e.deltaX)`. This lets trackpad horizontal-swipe fall through to the browser's default behavior. If wheel scrolling on the carousel ever stops working on a mouse, check that this condition is still inverted correctly (it should be `deltaY > deltaX`, not the other way around).
+18. **`onWheel` only hijacks vertical wheel motion** — guarded by `Math.abs(e.deltaY) > Math.abs(e.deltaX)`. This lets trackpad horizontal-swipe fall through to the browser's default behavior. If wheel scrolling on the carousel ever stops working on a mouse, check that this condition is still inverted correctly (it should be `deltaY > deltaX`, not the other way around).
+
+19. **The carousel is fragile and not worth "improving"** — during one debugging session, a small CSS tweak to the unrelated notecard renderer accidentally led to a multi-hour spiral of carousel "fixes" (switching `useState` to `useRef` for hover, adding window-level pointerup listeners, swapping mouse events for pointer events, adding blur/document pointerleave safety nets). All were attempts to solve a nonexistent bug. The carousel was working fine; the multi-line cards were a separate, simpler problem (gotcha #14). The carousel was eventually rolled back to its known-good state at commit `97378b5`. **Lesson: if asked to fix something specific (e.g. notecard rendering), don't also refactor the carousel "while you're in there." It is genuinely working; leave it alone.** If the carousel ever does need to change, see gotcha #20 below before debugging.
+
+20. **Diagnosing a "broken" carousel — read this before changing anything** — false-positive bug reports are easy here because:
+   - Vite hashes bundle filenames by content, so a fresh deploy can produce the *same* `index-XXXX.js` filename if the source change was minor; this looks like "the deploy didn't take" but didn't.
+   - Vite's minifier mangles local variable names (`hoveredRef` → `o`), so grepping the production bundle for source-level identifiers returns false negatives. Use class names, string literals, or method names like `setPointerCapture` for reliable bundle inspection.
+   - Multiple components in App.jsx use `onMouseEnter`/`onMouseLeave` for visual hover effects (PanelCard, nav buttons, etc.). Searching the bundle for `onMouseEnter` will return `true` even if the carousel itself doesn't have one.
+   - The rAF loop's apparent "freeze" can be from `hoveredRef` getting stuck `true` when `mouseleave` fails to fire (e.g. user alt-tabs or focus moves to DevTools mid-hover). If diagnosing, dump the React fiber refs via the carousel's parent `__reactFiber*` key — `hoveredRef.current === true` while the cursor isn't on the page is the smoking gun. But again: this only matters if you've already made changes to the carousel. The original code at `97378b5` doesn't have this problem because the original `[hovered]` useState behavior, while imperfect, hasn't caused user-visible issues.
 
 ### Modal / video
 
-18. **`playsInline` on the Watch film modal video is required** — without it, iOS Safari will try to take the video fullscreen the instant it autoplays, which breaks the modal experience. Don't remove this attribute.
+21. **`playsInline` on the Watch film modal video is required** — without it, iOS Safari will try to take the video fullscreen the instant it autoplays, which breaks the modal experience. Don't remove this attribute.
 
-19. **`e.stopPropagation()` on the modal's inner div** — clicks on the video element bubble up. Without `stopPropagation`, every click on the video controls (play/pause, seek bar) closes the modal. Don't remove the wrapper div or its handler.
+22. **`e.stopPropagation()` on the modal's inner div** — clicks on the video element bubble up. Without `stopPropagation`, every click on the video controls (play/pause, seek bar) closes the modal. Don't remove the wrapper div or its handler.
 
-20. **The video file is not in the repo** — `public/nookease-film.mp4` exists in production and locally but is NOT the kind of thing to regenerate on a whim. Re-rendering means going to the separate HyperFrames project, running `npx hyperframes render`, and copying the new MP4 in. (See "Watch film modal + nookease-film" section above.) If git starts complaining about file size on push, the MP4 grew — either trim the film or move it to external hosting (Cloudflare R2, S3, Vercel Blob) and update the `<video src>`.
+23. **The video file is not in the repo** — `public/nookease-film.mp4` exists in production and locally but is NOT the kind of thing to regenerate on a whim. Re-rendering means going to the separate HyperFrames project, running `npx hyperframes render`, and copying the new MP4 in. (See "Watch film modal + nookease-film" section above.) If git starts complaining about file size on push, the MP4 grew — either trim the film or move it to external hosting (Cloudflare R2, S3, Vercel Blob) and update the `<video src>`.
 
 ## How to make changes
 
@@ -319,3 +330,5 @@ Privacy copy says **"Yours, encrypted"** — "Your data lives in your account, e
 - Don't revert the Carousel to a CSS-keyframe animation — interactivity (wheel/drag/swipe) and wrap-around require imperative scroll control. The old `@keyframes scroll-x` rule is gone; if you need to slow the auto-advance, change `SPEED_PX_PER_SEC` in the Carousel component.
 - Don't remove the mobile-responsive className hooks (`site-nav`, `home-hero`, etc.) — they look unused next to inline styles but they wire up the `@media (max-width: 768px)` block in GlobalStyles. See "Mobile responsiveness" section.
 - Don't store sensitive data anywhere except Supabase, and don't add new tables without RLS policies
+- **Don't fix things that aren't broken.** When asked to make a focused change (e.g. "make my notecards render multi-line content"), make *only* that change. Don't refactor surrounding code "while you're in there," don't preemptively address possible bugs that the user didn't report, and don't restructure component state because something looks fragile. Each speculative edit is another chance to introduce a real bug while solving an imaginary one. See gotcha #19 for a concrete example of how this went sideways.
+- **When you can't reproduce a bug after several attempts, offer to roll back rather than continue patching.** If a debugging session has gone through 3+ rounds of "try this fix → didn't work → try this fix" without progress, the right move is to ask the user for the last known-good commit (`git show <hash>:src/App.jsx > backup.jsx`) and apply *only* the originally-requested change to that baseline. A clean rollback + minimal patch is almost always faster than continuing to chase a regression you may have caused.

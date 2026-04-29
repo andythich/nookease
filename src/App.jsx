@@ -1554,30 +1554,40 @@ const JournalPage = ({ panel, onNav, user }) => {
 // chosen metric over time. No chart library — keeps the bundle tiny.
 const WorkoutPage = ({ panel, onNav, user }) => {
   const [sessions, setSessions] = useState([]);
+  const [weights, setWeights] = useState([]);
   const [loading, setLoading] = useState(true);
   const today = new Date().toISOString().slice(0, 10);
   const [draft, setDraft] = useState({
     date: today, calories: '', miles: '', minutes: '',
   });
+  const [weightDraft, setWeightDraft] = useState({ date: today, weight: '' });
   const [metric, setMetric] = useState('calories'); // which series to chart
 
-  // Initial fetch
+  // Initial fetch — sessions + weights run in parallel
   useEffect(() => {
     if (!user) return;
     let cancelled = false;
     (async () => {
-      const { data, error } = await supabase
-        .from('workout_sessions')
-        .select('*')
-        .order('date', { ascending: true });
+      const [sessionsRes, weightsRes] = await Promise.all([
+        supabase.from('workout_sessions').select('*').order('date', { ascending: true }),
+        supabase.from('weight_logs').select('*').order('date', { ascending: true }),
+      ]);
       if (cancelled) return;
-      if (error) {
-        console.error('Workout fetch error:', error);
+      if (sessionsRes.error) {
+        console.error('Workout fetch error:', sessionsRes.error);
         setSessions([]);
       } else {
-        setSessions((data || []).map(r => ({
+        setSessions((sessionsRes.data || []).map(r => ({
           id: r.id, date: r.date,
           calories: Number(r.calories), miles: Number(r.miles), minutes: Number(r.minutes),
+        })));
+      }
+      if (weightsRes.error) {
+        console.error('Weight fetch error:', weightsRes.error);
+        setWeights([]);
+      } else {
+        setWeights((weightsRes.data || []).map(r => ({
+          id: r.id, date: r.date, weight: Number(r.weight),
         })));
       }
       setLoading(false);
@@ -1619,6 +1629,35 @@ const WorkoutPage = ({ panel, onNav, user }) => {
     if (error) {
       console.error('Remove session error:', error);
       setSessions(before);
+    }
+  };
+
+  const addWeight = async () => {
+    const w = parseFloat(weightDraft.weight);
+    if (isNaN(w) || w <= 0) return;
+    const row = {
+      user_id: user.id,
+      date: weightDraft.date,
+      weight: w,
+    };
+    const { data, error } = await supabase
+      .from('weight_logs')
+      .insert(row)
+      .select()
+      .single();
+    if (error) { console.error('Add weight error:', error); return; }
+    const inserted = { id: data.id, date: data.date, weight: Number(data.weight) };
+    setWeights(prev => [...prev, inserted].sort((a, b) => a.date.localeCompare(b.date)));
+    setWeightDraft({ date: today, weight: '' });
+  };
+
+  const removeWeight = async (id) => {
+    const before = weights;
+    setWeights(prev => prev.filter(w => w.id !== id));
+    const { error } = await supabase.from('weight_logs').delete().eq('id', id);
+    if (error) {
+      console.error('Remove weight error:', error);
+      setWeights(before);
     }
   };
 
@@ -1670,6 +1709,41 @@ const WorkoutPage = ({ panel, onNav, user }) => {
   }
 
   const metricLabels = { calories: 'calories burned', miles: 'miles', minutes: 'minutes' };
+
+  // ---------- Weight chart ----------
+  // Same hand-rolled SVG approach as the cardio chart above. We give the
+  // y-axis a little headroom/floor so the line doesn't sit flush on the edges.
+  const wValues = weights.map(w => w.weight);
+  const wRawMax = wValues.length ? Math.max(...wValues) : 0;
+  const wRawMin = wValues.length ? Math.min(...wValues) : 0;
+  const wRange = Math.max(1, wRawMax - wRawMin);
+  const wMaxVal = wValues.length ? wRawMax + wRange * 0.15 : 10;
+  const wMinVal = wValues.length ? Math.max(0, wRawMin - wRange * 0.15) : 0;
+
+  const wxAt = (i) => weights.length <= 1
+    ? padL + innerW / 2
+    : padL + (i / (weights.length - 1)) * innerW;
+  const wyAt = (v) => padT + innerH - ((v - wMinVal) / (wMaxVal - wMinVal)) * innerH;
+
+  const wTickValues = Array.from({ length: ticks + 1 }, (_, i) => wMinVal + ((wMaxVal - wMinVal) / ticks) * i);
+
+  let wLinePath = '';
+  let wAreaPath = '';
+  if (weights.length > 0) {
+    weights.forEach((w, i) => {
+      const x = wxAt(i), y = wyAt(w.weight);
+      wLinePath += (i === 0 ? `M ${x} ${y}` : ` L ${x} ${y}`);
+    });
+    if (weights.length === 1) {
+      const x = wxAt(0), y = wyAt(weights[0].weight);
+      wLinePath = `M ${x - 20} ${y} L ${x + 20} ${y}`;
+      wAreaPath = `M ${x - 20} ${y} L ${x + 20} ${y} L ${x + 20} ${padT + innerH} L ${x - 20} ${padT + innerH} Z`;
+    } else {
+      const lastX = wxAt(weights.length - 1);
+      const firstX = wxAt(0);
+      wAreaPath = wLinePath + ` L ${lastX} ${padT + innerH} L ${firstX} ${padT + innerH} Z`;
+    }
+  }
 
   return (
     <div className="fade-up" style={{ paddingTop: 100, minHeight: '100vh' }}>
@@ -1926,6 +2000,208 @@ const WorkoutPage = ({ panel, onNav, user }) => {
                 <div>{Math.round(s.minutes)}</div>
                 <button
                   onClick={() => removeSession(s.id)}
+                  title="Remove"
+                  style={{
+                    width: 28, height: 28, borderRadius: 6,
+                    color: '#8A7668', fontSize: 16,
+                    transition: 'background 0.2s, color 0.2s',
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.background = 'rgba(217,74,32,0.08)'; e.currentTarget.style.color = '#D94A20'; }}
+                  onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = '#8A7668'; }}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* ---------- Weight section ---------- */}
+        {/* A separate, quieter log: just date + weight. Same hand-rolled SVG
+            chart treatment as the cardio section above. */}
+        <div style={{
+          marginTop: 48,
+          marginBottom: 16,
+        }}>
+          <span className="mono" style={{ color: panel.hue }}>— Weight</span>
+          <div className="display" style={{
+            fontSize: 28, fontStyle: 'italic', fontWeight: 300,
+            letterSpacing: '-0.02em', color: '#2B1F17', marginTop: 4,
+          }}>
+            a quiet number, kept over time
+          </div>
+        </div>
+
+        {/* Add-weight row */}
+        <div style={{
+          background: '#FFFDFA',
+          border: '1px solid rgba(43,31,23,0.08)',
+          borderRadius: 20,
+          padding: 20,
+          marginBottom: 28,
+          display: 'grid',
+          gridTemplateColumns: '140px 1fr auto',
+          gap: 12,
+          alignItems: 'end',
+          boxShadow: '0 2px 8px rgba(43,31,23,0.04)',
+        }}>
+          <div>
+            <label className="mono" style={{ color: '#8A7668', display: 'block', marginBottom: 6 }}>Date</label>
+            <input
+              type="date"
+              value={weightDraft.date}
+              onChange={e => setWeightDraft({ ...weightDraft, date: e.target.value })}
+              style={inputStyle}
+            />
+          </div>
+          <div>
+            <label className="mono" style={{ color: '#8A7668', display: 'block', marginBottom: 6 }}>Weight (lbs)</label>
+            <input
+              type="number"
+              inputMode="decimal"
+              min="0"
+              step="0.1"
+              value={weightDraft.weight}
+              onChange={e => setWeightDraft({ ...weightDraft, weight: e.target.value })}
+              placeholder="e.g. 165.4"
+              style={inputStyle}
+            />
+          </div>
+          <button
+            onClick={addWeight}
+            className="mono"
+            style={{
+              padding: '12px 20px',
+              borderRadius: 999,
+              background: panel.hue,
+              color: '#FFFDFA',
+              height: 44,
+              transition: 'transform 0.2s, box-shadow 0.2s',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = `0 8px 20px -8px ${panel.hue}88`; }}
+            onMouseLeave={e => { e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = 'none'; }}
+          >
+            Log +
+          </button>
+        </div>
+
+        {/* Weight chart */}
+        <div style={{
+          background: '#FFFDFA',
+          border: '1px solid rgba(43,31,23,0.08)',
+          borderRadius: 20,
+          padding: '24px 24px 16px',
+          marginBottom: 28,
+          boxShadow: '0 2px 8px rgba(43,31,23,0.04)',
+        }}>
+          <div style={{ marginBottom: 12 }}>
+            <span className="mono" style={{ color: panel.hue }}>— Trend</span>
+            <div className="display" style={{
+              fontSize: 24, fontStyle: 'italic', fontWeight: 300,
+              color: '#2B1F17', marginTop: 4,
+            }}>
+              weight over time
+            </div>
+          </div>
+
+          {weights.length === 0 ? (
+            <div style={{
+              height: 240,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              color: '#8A7668', fontStyle: 'italic',
+            }}>
+              log a weight above to see the curve.
+            </div>
+          ) : (
+            <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
+              <defs>
+                <linearGradient id="wt-area" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={panel.hue} stopOpacity="0.35"/>
+                  <stop offset="100%" stopColor={panel.hue} stopOpacity="0"/>
+                </linearGradient>
+              </defs>
+
+              {/* Y-axis grid + labels */}
+              {wTickValues.map((t, i) => {
+                const y = wyAt(t);
+                return (
+                  <g key={i}>
+                    <line x1={padL} y1={y} x2={W - padR} y2={y}
+                          stroke="#2B1F17" strokeOpacity="0.06" strokeDasharray="3 4"/>
+                    <text x={padL - 8} y={y + 4} textAnchor="end"
+                          fontFamily="Inter Tight" fontSize="10" fill="#8A7668">
+                      {t.toFixed(1)}
+                    </text>
+                  </g>
+                );
+              })}
+
+              {/* X-axis baseline */}
+              <line x1={padL} y1={padT + innerH} x2={W - padR} y2={padT + innerH}
+                    stroke="#2B1F17" strokeOpacity="0.2"/>
+
+              {/* Area + line */}
+              <path d={wAreaPath} fill="url(#wt-area)"/>
+              <path d={wLinePath} fill="none" stroke={panel.hue} strokeWidth="2"
+                    strokeLinecap="round" strokeLinejoin="round"/>
+
+              {/* Points + x-axis date labels */}
+              {weights.map((w, i) => {
+                const x = wxAt(i), y = wyAt(w.weight);
+                const showLabel = weights.length <= 8 ||
+                  i === 0 || i === weights.length - 1 ||
+                  i % Math.ceil(weights.length / 6) === 0;
+                const dateLabel = new Date(w.date + 'T00:00').toLocaleDateString([], { month: 'short', day: 'numeric' });
+                return (
+                  <g key={w.id}>
+                    <circle cx={x} cy={y} r="4" fill="#FFFDFA" stroke={panel.hue} strokeWidth="2"/>
+                    {showLabel && (
+                      <text x={x} y={padT + innerH + 18} textAnchor="middle"
+                            fontFamily="Inter Tight" fontSize="10" fill="#8A7668">
+                        {dateLabel}
+                      </text>
+                    )}
+                  </g>
+                );
+              })}
+            </svg>
+          )}
+        </div>
+
+        {/* Weight list */}
+        {weights.length > 0 && (
+          <div style={{
+            background: '#FFFDFA',
+            border: '1px solid rgba(43,31,23,0.08)',
+            borderRadius: 20,
+            overflow: 'hidden',
+            boxShadow: '0 2px 8px rgba(43,31,23,0.04)',
+          }}>
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: '1fr 1fr 50px',
+              padding: '14px 22px',
+              borderBottom: '1px solid rgba(43,31,23,0.08)',
+              background: 'rgba(255,122,69,0.04)',
+            }}>
+              {['Date', 'Weight (lbs)', ''].map(h => (
+                <div key={h} className="mono" style={{ color: '#8A7668' }}>{h}</div>
+              ))}
+            </div>
+            {[...weights].reverse().map(w => (
+              <div key={w.id} style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr 50px',
+                padding: '14px 22px',
+                borderBottom: '1px solid rgba(43,31,23,0.04)',
+                alignItems: 'center',
+                fontSize: 14,
+                color: '#2B1F17',
+              }}>
+                <div>{new Date(w.date + 'T00:00').toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}</div>
+                <div>{w.weight.toFixed(1)}</div>
+                <button
+                  onClick={() => removeWeight(w.id)}
                   title="Remove"
                   style={{
                     width: 28, height: 28, borderRadius: 6,

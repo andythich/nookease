@@ -174,17 +174,14 @@ const GlobalStyles = () => (
         height: 52px !important;
       }
 
-      /* Carousel on mobile: snap each panel into place so a single swipe
-         advances exactly one panel instead of leaving the user mid-card.
-         Auto-advance is disabled on touch devices in the Carousel component
-         (see hover:none check) — together these turn the carousel from a
-         100-swipe slog into a normal one-swipe-per-panel flick. */
+      /* Carousel on mobile: smooth momentum scrolling on iOS. Auto-advance is
+         disabled on touch devices in the Carousel component (see hover:none
+         check) so finger swipes aren't fought by the rAF loop. We do NOT use
+         scroll-snap here — it conflicts with the wrap-around scrollLeft
+         writes in the rAF tick loop and can freeze touch gestures on iOS
+         Safari (see gotcha #20a). */
       .carousel-scroller {
-        scroll-snap-type: x mandatory;
         -webkit-overflow-scrolling: touch;
-      }
-      .carousel-scroller > button {
-        scroll-snap-align: center;
       }
     }
   `}</style>
@@ -494,8 +491,10 @@ const Carousel = ({ onSelect }) => {
   // Touch devices fight the auto-advance: every finger flick gets undone by the
   // rAF loop writing scrollLeft on the next frame, so a 5-panel carousel takes
   // ~100 swipes to traverse. We disable auto-advance on hover-less devices
-  // (phones, tablets) and rely entirely on user swipe + scroll-snap (see
-  // GlobalStyles mobile block). Desktop behavior is unchanged.
+  // (phones, tablets) and rely entirely on the user's swipe + native momentum
+  // scrolling. Desktop behavior is unchanged. (We tried adding CSS scroll-snap
+  // for cleaner alignment too, but it conflicts with the wrap-around
+  // scrollLeft writes below — see gotcha #20a.)
   const isTouch = typeof window !== 'undefined'
     && window.matchMedia('(hover: none)').matches;
 

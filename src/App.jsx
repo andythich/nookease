@@ -173,6 +173,19 @@ const GlobalStyles = () => (
         width: 52px !important;
         height: 52px !important;
       }
+
+      /* Carousel on mobile: snap each panel into place so a single swipe
+         advances exactly one panel instead of leaving the user mid-card.
+         Auto-advance is disabled on touch devices in the Carousel component
+         (see hover:none check) — together these turn the carousel from a
+         100-swipe slog into a normal one-swipe-per-panel flick. */
+      .carousel-scroller {
+        scroll-snap-type: x mandatory;
+        -webkit-overflow-scrolling: touch;
+      }
+      .carousel-scroller > button {
+        scroll-snap-align: center;
+      }
     }
   `}</style>
 );
@@ -478,6 +491,14 @@ const Carousel = ({ onSelect }) => {
   // animation (~30px/s for the typical PANELS length).
   const SPEED_PX_PER_SEC = 30;
 
+  // Touch devices fight the auto-advance: every finger flick gets undone by the
+  // rAF loop writing scrollLeft on the next frame, so a 5-panel carousel takes
+  // ~100 swipes to traverse. We disable auto-advance on hover-less devices
+  // (phones, tablets) and rely entirely on user swipe + scroll-snap (see
+  // GlobalStyles mobile block). Desktop behavior is unchanged.
+  const isTouch = typeof window !== 'undefined'
+    && window.matchMedia('(hover: none)').matches;
+
   useEffect(() => {
     const el = scrollerRef.current;
     if (!el) return;
@@ -496,7 +517,7 @@ const Carousel = ({ onSelect }) => {
       const dt = (now - last) / 1000;
       lastTickRef.current = now;
 
-      const isPaused = hovered || dragRef.current.active || now < pauseUntilRef.current;
+      const isPaused = isTouch || hovered || dragRef.current.active || now < pauseUntilRef.current;
       if (!isPaused && el) {
         // Accumulate fractionally, then write the rounded position to the DOM.
         virtualScrollRef.current += SPEED_PX_PER_SEC * dt;
@@ -1141,6 +1162,12 @@ const JournalPage = ({ panel, onNav, user }) => {
 
   const editorRef = useRef(null);
   const saveTimerRef = useRef(null);
+  // Tracks the last activeId we synced into the editor's innerHTML. We use
+  // this instead of comparing innerHTML to activePage.html, because the
+  // browser re-serializes contentEditable HTML (whitespace, attribute order,
+  // etc.) which makes innerHTML !== activePage.html spuriously true on every
+  // render — and triggers an overwrite mid-typing that wipes characters.
+  const lastSyncedIdRef = useRef(null);
   const activePage = pages.find(p => p.id === activeId) || pages[0];
 
   // Initial fetch — and create a starter page if the user has none yet
@@ -1190,14 +1217,16 @@ const JournalPage = ({ panel, onNav, user }) => {
   }, [user]);
 
   // When you switch pages, swap the editor's HTML in (we keep it
-  // uncontrolled to avoid the cursor jumping while typing).
+  // uncontrolled to avoid the cursor jumping while typing). We only sync
+  // when activeId actually changes — comparing innerHTML to activePage.html
+  // every render led to mid-typing overwrites because the browser re-formats
+  // contentEditable HTML and the comparison would spuriously fail.
   useEffect(() => {
-    if (editorRef.current && activePage) {
-      if (editorRef.current.innerHTML !== activePage.html) {
-        editorRef.current.innerHTML = activePage.html || '';
-      }
-    }
-  }, [activeId]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!editorRef.current) return;
+    if (lastSyncedIdRef.current === activeId) return;
+    lastSyncedIdRef.current = activeId;
+    editorRef.current.innerHTML = activePage?.html || '';
+  }, [activeId, activePage]);
 
   // Local update + debounced save to Supabase.
   // We update local state immediately so typing is responsive, then
@@ -1208,8 +1237,11 @@ const JournalPage = ({ panel, onNav, user }) => {
     setPages(prev => prev.map(p =>
       p.id === activeId ? { ...p, ...patch, updated: now } : p
     ));
-    // Debounce the network call
+    // Debounce the network call. Capture activeId at schedule time — if the
+    // user switches pages within the 600ms window, the save still goes to
+    // the page that was active when they typed, not the one they're on now.
     clearTimeout(saveTimerRef.current);
+    const idAtSchedule = activeId;
     saveTimerRef.current = setTimeout(async () => {
       const { error } = await supabase
         .from('journal_pages')
@@ -1218,7 +1250,7 @@ const JournalPage = ({ panel, onNav, user }) => {
           ...(patch.html !== undefined && { html: patch.html }),
           updated_at: new Date().toISOString(),
         })
-        .eq('id', activeId);
+        .eq('id', idAtSchedule);
       if (error) console.error('Journal save error:', error);
     }, 600);
   };

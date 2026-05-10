@@ -488,13 +488,20 @@ const Carousel = ({ onSelect }) => {
   // animation (~30px/s for the typical PANELS length).
   const SPEED_PX_PER_SEC = 30;
 
-  // Touch devices fight the auto-advance: every finger flick gets undone by the
-  // rAF loop writing scrollLeft on the next frame, so a 5-panel carousel takes
-  // ~100 swipes to traverse. We disable auto-advance on hover-less devices
-  // (phones, tablets) and rely entirely on the user's swipe + native momentum
-  // scrolling. Desktop behavior is unchanged. (We tried adding CSS scroll-snap
-  // for cleaner alignment too, but it conflicts with the wrap-around
-  // scrollLeft writes below — see gotcha #20a.)
+  // Touch devices need a fundamentally different code path. Three things in
+  // the desktop flow each fight finger swipes on mobile:
+  //   1. The rAF auto-advance writes scrollLeft every frame.
+  //   2. The wrap-around snap also writes scrollLeft every frame (even when
+  //      auto-advance is paused), interrupting iOS momentum mid-flick.
+  //   3. touch-action: pan-y disables native horizontal scroll, leaving the
+  //      JS pointer-drag handler to set scrollLeft as a raw 1:1 finger drag
+  //      with zero inertia — that's the "100 swipes to traverse" symptom.
+  // The cleanest fix is to step out of the browser's way entirely on touch:
+  // skip the rAF loop, skip the pointer handlers, and switch touch-action so
+  // the browser handles horizontal scroll natively with iOS momentum. With
+  // three copies of the panels (~5520px of slack) the user won't reach the
+  // hard edge in normal swiping; if they ever do, the carousel just stops,
+  // which is fine. Desktop behavior is unchanged.
   const isTouch = typeof window !== 'undefined'
     && window.matchMedia('(hover: none)').matches;
 
@@ -509,6 +516,11 @@ const Carousel = ({ onSelect }) => {
       virtualScrollRef.current = el.scrollLeft;
     });
 
+    // Touch path: native scroll only. No rAF, no wrap snap, no JS drag.
+    if (isTouch) {
+      return () => cancelAnimationFrame(initId);
+    }
+
     // RAF loop: nudges scrollLeft forward when idle, snaps the wrap when the
     // user (or the loop itself) crosses an edge copy.
     const tick = (now) => {
@@ -516,7 +528,7 @@ const Carousel = ({ onSelect }) => {
       const dt = (now - last) / 1000;
       lastTickRef.current = now;
 
-      const isPaused = isTouch || hovered || dragRef.current.active || now < pauseUntilRef.current;
+      const isPaused = hovered || dragRef.current.active || now < pauseUntilRef.current;
       if (!isPaused && el) {
         // Accumulate fractionally, then write the rounded position to the DOM.
         virtualScrollRef.current += SPEED_PX_PER_SEC * dt;
@@ -547,7 +559,7 @@ const Carousel = ({ onSelect }) => {
       cancelAnimationFrame(initId);
       cancelAnimationFrame(rafRef.current);
     };
-  }, [hovered]);
+  }, [hovered, isTouch]);
 
   // Mouse wheel: vertical wheel scroll → horizontal carousel scroll. We only
   // hijack when the wheel's dominant axis is vertical so trackpad horizontal
@@ -620,11 +632,11 @@ const Carousel = ({ onSelect }) => {
       <div
         ref={scrollerRef}
         onWheel={onWheel}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={endDrag}
-        onPointerCancel={endDrag}
-        onPointerLeave={endDrag}
+        onPointerDown={isTouch ? undefined : onPointerDown}
+        onPointerMove={isTouch ? undefined : onPointerMove}
+        onPointerUp={isTouch ? undefined : endDrag}
+        onPointerCancel={isTouch ? undefined : endDrag}
+        onPointerLeave={isTouch ? undefined : endDrag}
         className="carousel-scroller"
         style={{
           display: 'flex',
@@ -633,9 +645,12 @@ const Carousel = ({ onSelect }) => {
           overflowY: 'hidden',
           scrollbarWidth: 'none',
           msOverflowStyle: 'none',
-          // pan-y lets vertical page scroll work on mobile; we only hijack horizontal.
-          touchAction: 'pan-y',
-          cursor: 'grab',
+          // Desktop: pan-y so vertical page scroll still works while JS drives
+          // horizontal via pointer drag. Touch: pan-x pan-y so the browser
+          // handles horizontal scroll natively with iOS momentum (the JS drag
+          // handlers above are disabled on touch so they can't fight it).
+          touchAction: isTouch ? 'pan-x pan-y' : 'pan-y',
+          cursor: isTouch ? 'default' : 'grab',
           userSelect: 'none',
           WebkitUserSelect: 'none',
         }}
